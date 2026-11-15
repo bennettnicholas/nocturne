@@ -217,6 +217,15 @@ export const items: CommandPaletteItem[] = [
 		platformAdmin: true,
 	},
 	{
+		id: "page-batch-migration",
+		label: "Batch migration",
+		group: "settings",
+		keywords: ["batch", "bulk", "migrate", "migration", "nightscout", "mongodb", "import users", "platform admin"],
+		icon: Users,
+		href: "/settings/admin/batch-migration",
+		platformAdmin: true,
+	},
+	{
 		id: "page-administration",
 		label: "Administration",
 		group: "settings",

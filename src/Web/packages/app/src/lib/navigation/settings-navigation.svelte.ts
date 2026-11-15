@@ -178,6 +178,12 @@ function settingsGroups(): SettingsGroup[] {
           icon: MailPlus,
         },
         {
+          title: "Batch migration",
+          description: "Move many Nightscout users onto this server from MongoDB.",
+          href: "/settings/admin/batch-migration",
+          icon: Users,
+        },
+        {
           title: "Access requests",
           description: "People who ask to join this server.",
           href: "/settings/access-requests",

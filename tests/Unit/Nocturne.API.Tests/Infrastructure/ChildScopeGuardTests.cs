@@ -59,6 +59,7 @@ public partial class ChildScopeGuardTests
         "src/API/Nocturne.API/Services/Health/GoogleHealth/PostgresGoogleHealthGrantHolders.cs: PostgresGoogleHealthGrantHolders.AdoptAsync",
         "src/API/Nocturne.API/Services/Jobs/JobScheduler.cs: JobScheduler.RunAsync",
         "src/API/Nocturne.API/Services/Migration/MigrationStartupService.cs: MigrationStartupService.NotifyIfPendingAsync",
+        "src/API/Nocturne.API/Services/Migration/BatchMigrationService.cs: BatchMigrationService.ProvisionAsync",
         "src/API/Nocturne.API/Services/Platform/InstanceKey/InstanceKeyChangeService.cs: InstanceKeyChangeService.ReconcilePlatformAsync",
         "src/API/Nocturne.API/Services/Platform/InstanceKey/InstanceKeyChangeService.cs: InstanceKeyChangeService.ReconcileTenantAsync",
         "src/API/Nocturne.API/Services/Platform/Releases/ReleaseNoticeJob.cs: ReleaseNoticeJob.NotifyOwnersAsync",

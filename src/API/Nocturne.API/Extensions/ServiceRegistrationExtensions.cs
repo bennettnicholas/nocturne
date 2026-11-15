@@ -1301,6 +1301,10 @@ public static class ServiceRegistrationExtensions
             Nocturne.API.Services.Migration.MigrationJobService
         >();
         services.AddHostedService<Nocturne.API.Services.Migration.MigrationStartupService>();
+        services.AddSingleton<
+            Nocturne.API.Services.Migration.IBatchMigrationService,
+            Nocturne.API.Services.Migration.BatchMigrationService
+        >();
 
         // The Nightscout to migrate from is a tenant-admin-supplied URL, the same shape as a
         // connector base URL, so it takes the connector client. That also puts redirects under the

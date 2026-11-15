@@ -27,6 +27,7 @@ describe("visibleSettingsGroups", () => {
       "/settings/admin",
       "/settings/admin/tenants",
       "/settings/admin/invites",
+      "/settings/admin/batch-migration",
       "/settings/access-requests",
       "/settings/admin/connector-cursors",
     ]);

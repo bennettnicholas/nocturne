@@ -6,6 +6,7 @@
 </script>
 
 <script lang="ts">
+  import { resolve } from "$app/paths";
   import { Button } from "#lib/components/ui/button/index.js";
   import * as Alert from "#lib/components/ui/alert/index.js";
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
@@ -113,5 +114,18 @@
       </Button>
       <Button variant="ghost" onclick={onTakeTour}>Take the 60-second tour</Button>
     </div>
+
+    <p class="text-sm text-muted-foreground max-w-130" data-testid="finish-batch-migration">
+      Moving a group of Nightscout users onto this server, such as a clinic or a hosted
+      Nightscout service?
+      <a
+        class="underline underline-offset-2 text-foreground"
+        href={resolve("settings/admin/batch-migration")}
+        target="_blank"
+        rel="noopener">Batch migration</a
+      >
+      creates a site for each of up to 100 users and imports their data from MongoDB. It is
+      also under Settings, Platform.
+    </p>
   </div>
 </div>
