@@ -84,6 +84,13 @@ $Template    = Join-Path $PSScriptRoot 'infra\nocturne-vm.bicep'
 $Installer   = Join-Path $PSScriptRoot 'install-nocturne.sh'
 $SecretsDir  = Join-Path $PSScriptRoot 'secrets'
 $SecretsFile = Join-Path $SecretsDir "$ResourceGroup.env"
+# The commands this script prints for later (remove, logs, ...) are the one-line installer from
+# GitHub with an action, so they work on any computer, from any folder. get-nocturne.ps1 passes
+# its own address, so a fork or another branch prints its own.
+$GetUrl      = 'https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.ps1'
+if ($env:NOCTURNE_GET_URL) { $GetUrl = $env:NOCTURNE_GET_URL }
+$GetCommand  = "irm $GetUrl | iex"
+$Self        = "& ([scriptblock]::Create((irm $GetUrl)))"
 $Deployment  = 'nocturne'
 $VmName      = "$Name-vm"
 
@@ -396,14 +403,15 @@ function Show-Info($o) {
     Write-Host ''
     Write-Host "  Nocturne:  https://$($o.BaseDomain)" -ForegroundColor Green
     Write-Host "  Public IP: $($o.Ip)"
-    Write-Host "  SSH:       .\Deploy-NocturneAzure.ps1 -Action Ssh      (ssh -i `"$SshKeyPath`" $($o.User)@$($o.AzureFqdn))"
-    Write-Host "  Logs:      .\Deploy-NocturneAzure.ps1 -Action Logs"
+    Write-Host "  SSH:       $Self -Action Ssh      (ssh -i `"$SshKeyPath`" $($o.User)@$($o.AzureFqdn))"
+    Write-Host "  Logs:      $Self -Action Logs"
+    Write-Host "  Remove:    $Self -Action Remove   (deletes everything in Azure, stops billing)"
     Write-Host "  Secrets:   $SecretsFile   (back this up)"
 }
 
 if ($Action -ne 'Deploy') {
     $o = Get-DeploymentOutputs
-    if (-not $o -and $Action -ne 'Remove') { Fail "No Nocturne deployment found in '$ResourceGroup'. Deploy first:  .\Deploy-NocturneAzure.ps1" }
+    if (-not $o -and $Action -ne 'Remove') { Fail "No Nocturne deployment found in '$ResourceGroup'. Deploy first:  $GetCommand" }
     switch ($Action) {
         'Info' { Show-Info $o; exit 0 }
         'Ssh'  { & ssh -i $SshKeyPath "$($o.User)@$($o.AzureFqdn)"; exit $LASTEXITCODE }
@@ -418,7 +426,7 @@ if ($Action -ne 'Deploy') {
             Step 'Uploading install-nocturne.sh to the VM and re-running it (keeps .env and data)'
             $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Installer))
             $out = Invoke-VmShell "echo '$b64' | base64 -d > /opt/nocturne/install-nocturne.sh && chmod 700 /opt/nocturne/install-nocturne.sh && /opt/nocturne/install-nocturne.sh > /tmp/nocturne-reinstall.out 2>&1; code=`$?; tail -n 25 /tmp/nocturne-reinstall.out; exit `$code"
-            if ($null -eq $out) { Fail 'The installer failed or the VM could not be reached.' @('Details:  .\Deploy-NocturneAzure.ps1 -Action Logs') }
+            if ($null -eq $out) { Fail 'The installer failed or the VM could not be reached.' @("Details:  $Self -Action Logs") }
             Write-Host $out
             if ($out -match 'NOCTURNE_INSTALL_DONE') { Ok 'Reinstall finished' } else { Fail 'Reinstall did not finish (output above).' }
             exit 0
@@ -567,7 +575,7 @@ Write-Host '  This is ONLY AN ESTIMATE. Your actual bill can differ: it uses lis
 Write-Host "  $Location at $HoursPerMonth hours a month, and does not include data transfer beyond the free" -ForegroundColor Yellow
 Write-Host '  allowance, disk transactions, backups or taxes, or any discounts, credits or currency' -ForegroundColor Yellow
 Write-Host '  conversion on your account. Check your costs in the Azure portal (Cost Management).' -ForegroundColor Yellow
-Write-Host '  The VM bills until you remove it:  .\Deploy-NocturneAzure.ps1 -Action Remove' -ForegroundColor Yellow
+Write-Host "  The VM bills until you remove it:  $Self -Action Remove" -ForegroundColor Yellow
 Write-Host ''
 if ($Yes) {
     Info '-Yes given: continuing without asking.'
@@ -670,13 +678,13 @@ while ($true) {
         if ($newest -and $newest -ne $lastLine) { Info "VM: $newest"; $lastLine = $newest } else { Info '...still working' }
         if ($out -match 'NOCTURNE_INSTALL_DONE') { Ok 'install-nocturne.sh finished: containers are running'; break }
         if ($out -match 'ERROR:' -or $out -match 'status: error') {
-            Fail 'install-nocturne.sh failed on the VM.' @('Details:  .\Deploy-NocturneAzure.ps1 -Action Logs',
-                'After fixing:  .\Deploy-NocturneAzure.ps1 -Action Reinstall')
+            Fail 'install-nocturne.sh failed on the VM.' @("Details:  $Self -Action Logs",
+                "After fixing:  $Self -Action Reinstall")
         }
     } else {
         Info '...VM agent not answering yet'
     }
-    if ((Get-Date) -gt $until) { Fail "Setup did not finish in $TimeoutMinutes minutes." @('Check:  .\Deploy-NocturneAzure.ps1 -Action Logs') }
+    if ((Get-Date) -gt $until) { Fail "Setup did not finish in $TimeoutMinutes minutes." @("Check:  $Self -Action Logs") }
     Start-Sleep 15
 }
 
@@ -694,7 +702,7 @@ while ($true) {
     if ($status) { Info "...HTTP $status, services still starting" }
     if ((Get-Date) -gt $until) {
         Warn 'Nocturne did not answer over HTTPS within 10 minutes. It may still be starting.'
-        Info 'Check:  .\Deploy-NocturneAzure.ps1 -Action Logs'
+        Info "Check:  $Self -Action Logs"
         break
     }
     Start-Sleep 15
@@ -706,6 +714,6 @@ Write-Host ''
 $setupUrl = "https://$($o.BaseDomain)/setup"
 Write-Host "  Next: finish the first-run setup (create the owner account) at  $setupUrl" -ForegroundColor Cyan
 if ($null -ne $total) { Write-Host "  Estimated running cost: about $(Format-Usd $total) a month (estimate only)." -ForegroundColor Cyan }
-Write-Host '  Remove everything (stops billing):  .\Deploy-NocturneAzure.ps1 -Action Remove' -ForegroundColor Cyan
+Write-Host "  Remove everything (stops billing):  $Self -Action Remove" -ForegroundColor Cyan
 $ans = Read-Host 'Open the setup page in your browser now? (Y/N)'
 if ($ans -match '^[Yy]') { Start-Process $setupUrl }

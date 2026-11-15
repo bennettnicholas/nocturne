@@ -24,9 +24,7 @@ if ($env:NOCTURNE_TOOLS_DIR) { $Dest = $env:NOCTURNE_TOOLS_DIR }
 # The toolkit: only these files are downloaded, not the whole repository.
 $Files = @(
     'Deploy-NocturneAzure.ps1',
-    'Deploy-NocturneAzure.cmd',
     'deploy-nocturne-azure.sh',
-    'Deploy-NocturneAzure.command',
     'install-nocturne.sh',
     'infra/nocturne-vm.bicep'
 )
@@ -62,7 +60,12 @@ $Files = @(
     Write-Host '==> Starting Deploy-NocturneAzure.ps1' -ForegroundColor Cyan
     # A separate process with -ExecutionPolicy Bypass: works without changing the PC's policy.
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $Dest 'Deploy-NocturneAzure.ps1')) + @($DeployArgs | Where-Object { $null -ne $_ })
-    & powershell.exe @argList
+    # The deploy script prints this command (with an action) for later, so it shows this address.
+    $getUrl = "$BaseUrl/get-nocturne.ps1"
+    $before = $env:NOCTURNE_GET_URL
+    $env:NOCTURNE_GET_URL = $getUrl
+    try { & powershell.exe @argList }
+    finally { $env:NOCTURNE_GET_URL = $before }
     Write-Host ''
-    Write-Host "Run it again later:  $Dest\Deploy-NocturneAzure.cmd   (or the same one-line command to update first)" -ForegroundColor Gray
+    Write-Host "Run it again later:  irm $getUrl | iex" -ForegroundColor Gray
 }

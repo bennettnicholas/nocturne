@@ -21,7 +21,7 @@ main() {
   DEST="${NOCTURNE_TOOLS_DIR:-$HOME/nocturne-azure}"
 
   # The toolkit: only these files are downloaded, not the whole repository.
-  files="Deploy-NocturneAzure.ps1 Deploy-NocturneAzure.cmd deploy-nocturne-azure.sh Deploy-NocturneAzure.command install-nocturne.sh infra/nocturne-vm.bicep"
+  files="Deploy-NocturneAzure.ps1 deploy-nocturne-azure.sh install-nocturne.sh infra/nocturne-vm.bicep"
 
   printf '\033[36m==> Downloading the Nocturne deploy toolkit (%s, %s)\033[0m\n' "$REPO" "$BRANCH"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/nocturne-get.XXXXXX")
@@ -35,12 +35,14 @@ main() {
   mkdir -p "$DEST"
   # Copy over the old version; secrets/ and logs/ are not in the download, so they are kept.
   cp -R "$tmp/." "$DEST/"
-  chmod +x "$DEST"/*.sh "$DEST"/*.command 2>/dev/null || true
+  chmod +x "$DEST"/*.sh 2>/dev/null || true
   printf '\033[32m    Toolkit is in %s\033[0m\n' "$DEST"
 
   printf '\033[36m==> Starting deploy-nocturne-azure.sh\033[0m\n'
   cd "$DEST"
   status=0
+  # The deploy script prints this command (with an action) for later, so it shows this address.
+  export NOCTURNE_GET_URL="$BASE_URL/get-nocturne.sh"
   # With `curl | bash`, stdin is the pipe, so give the deploy script the terminal instead.
   if [ -r /dev/tty ] && (: < /dev/tty) 2>/dev/null; then
     bash ./deploy-nocturne-azure.sh "$@" < /dev/tty || status=$?
@@ -48,7 +50,7 @@ main() {
     bash ./deploy-nocturne-azure.sh "$@" < /dev/null || status=$?
   fi
   echo
-  echo "Run it again later:  cd \"$DEST\" && bash deploy-nocturne-azure.sh   (or the same one-line command to update first)"
+  echo "Run it again later:  curl -fsSL $NOCTURNE_GET_URL | bash"
   return "$status"
 }
 

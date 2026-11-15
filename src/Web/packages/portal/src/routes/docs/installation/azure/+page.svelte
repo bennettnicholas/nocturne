@@ -37,10 +37,22 @@
             ? `& ([scriptblock]::Create((irm ${url}))) -Domain ${guide.host}`
             : `irm ${url} | iex`;
     });
+    // The one-line command with an action, such as Remove. It downloads the toolkit from GitHub
+    // again, so it works on any computer, from any folder.
     // @wc-ignore
-    const deployScript = $derived(mac ? "bash deploy-nocturne-azure.sh" : ".\\Deploy-NocturneAzure.ps1");
-    // @wc-ignore
-    const actionFlag = $derived(mac ? "--action" : "-Action");
+    const actionPrefix = $derived(
+        mac ? `curl -fsSL ${TOOLKIT}/get-nocturne.sh | bash -s --` : `& ([scriptblock]::Create((irm ${TOOLKIT}/get-nocturne.ps1)))`,
+    );
+    const actionCommand = (action: string) =>
+        `${actionPrefix} ${mac ? `--action ${action.toLowerCase()}` : `-Action ${action}`}`;
+
+    const ACTIONS = [
+        { action: "Info", what: "Show the address, IP address and SSH details" },
+        { action: "Logs", what: "Show container status and recent logs" },
+        { action: "Ssh", what: "Open a shell on the server. Everything lives in /opt/nocturne" },
+        { action: "Reinstall", what: "Run the installer on the server again, keeping your data and passwords" },
+        { action: "Remove", what: "Delete everything in Azure and stop billing. You type the name to confirm" },
+    ];
 
     const STEPS = [
         { id: "step-1", title: "Open a terminal" },
@@ -174,9 +186,8 @@
         <p>
             Running the same command a second time is safe. It updates the toolkit, then reuses your
             existing passwords, region and address. To start the installer on the server again
-            without touching your data, run
-            <code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded">{deployScript} {actionFlag} {mac ? "reinstall" : "Reinstall"}</code>
-            from the <code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded">nocturne-azure</code> folder.
+            without touching your data, run the Reinstall command in
+            <a href="#manage" class="text-primary hover:underline">Managing the server</a>.
         </p>
     </Callout>
 
@@ -253,28 +264,16 @@
             the server's disk, or turn on Azure Backup for the VM, which is charged separately.
         </li>
     </ul>
+    <h2 id="manage" class="text-2xl font-bold mt-8 mb-4 scroll-mt-48 md:scroll-mt-36">Managing the server</h2>
     <p class="text-muted-foreground mb-4">
-        To manage the server, run the deploy script from the
-        <code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded">nocturne-azure</code> folder with an action:
+        Run the one-line command again with an action. It downloads the toolkit from GitHub and runs
+        it, so it works from any folder. Ssh needs the computer you deployed from, which holds the
+        SSH key.
     </p>
-    <div class="overflow-x-auto mb-8">
-        <table class="w-full text-sm text-muted-foreground">
-            <thead>
-                <tr class="border-b border-border text-left text-foreground">
-                    <th class="py-2 pr-4 font-semibold">Command</th>
-                    <th class="py-2 font-semibold">What it does</th>
-                </tr>
-            </thead>
-            <tbody>
-                {#each [["Info", "Shows the address, IP address and SSH details"], ["Logs", "Shows container status and recent logs"], ["Ssh", "Opens a shell on the server. Everything lives in /opt/nocturne"], ["Reinstall", "Runs the installer again, keeping your data and passwords"], ["Remove", "Deletes everything in Azure and stops billing. You type the name to confirm"]] as [action, what] (action)}
-                    <tr class="border-b border-border">
-                        <td class="py-2 pr-4"><code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded whitespace-nowrap">{deployScript} {actionFlag} {mac ? action.toLowerCase() : action}</code></td>
-                        <td class="py-2">{what}</td>
-                    </tr>
-                {/each}
-            </tbody>
-        </table>
-    </div>
+    {#each ACTIONS as { action, what } (action)}
+        <p class="text-sm text-muted-foreground mb-2">{what}:</p>
+        <CodeBlock code={actionCommand(action)} class="mb-4" />
+    {/each}
 
     <h2 data-install-step="next-steps" class="text-2xl font-bold mt-8 mb-4">Next steps</h2>
     <NextSteps />

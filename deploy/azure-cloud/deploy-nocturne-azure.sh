@@ -60,7 +60,11 @@ YES=0
 TIMEOUT_MIN=30
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SELF="bash $(basename "${BASH_SOURCE[0]}")"
+# The commands this script prints for later (remove, logs, ...) are the one-line installer from
+# GitHub with an action, so they work on any computer, from any folder. get-nocturne.sh passes
+# its own address, so a fork or another branch prints its own.
+GET_URL="${NOCTURNE_GET_URL:-https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.sh}"
+SELF="curl -fsSL $GET_URL | bash -s --"
 TEMPLATE="$HERE/infra/nocturne-vm.bicep"
 INSTALLER="$HERE/install-nocturne.sh"
 SECRETS_DIR="$HERE/secrets"
@@ -312,6 +316,7 @@ show_info() {
   echo "  Public IP: $O_IP"
   echo "  SSH:       $SELF --action ssh      (ssh -i \"$SSH_KEY\" $O_USER@$O_FQDN)"
   echo "  Logs:      $SELF --action logs"
+  echo "  Remove:    $SELF --action remove   (deletes everything in Azure, stops billing)"
   echo "  Secrets:   $SECRETS_FILE   (back this up)"
 }
 
@@ -341,7 +346,7 @@ sign_in() {
 # ------------------------------------------------------------------ actions other than deploy
 other_action() {
   if ! load_outputs && [ "$ACTION" != remove ]; then
-    fail "No Nocturne deployment found in '$RESOURCE_GROUP'. Deploy first:  $SELF"
+    fail "No Nocturne deployment found in '$RESOURCE_GROUP'. Deploy first:  curl -fsSL $GET_URL | bash"
   fi
   case "$ACTION" in
     info) show_info ;;
