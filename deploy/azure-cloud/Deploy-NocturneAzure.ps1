@@ -373,30 +373,104 @@ function Format-Usd($v) { if ($null -eq $v) { return 'n/a' } return ('${0:N2}' -
 $HoursPerMonth = 730
 
 # ================================================================ 2. sign in
+# az login, into $TenantId when set. Without one, --allow-no-subscriptions lets the sign-in succeed
+# even when the default directory has no subscription (or wants MFA), so the directory picker can
+# run afterwards instead of the sign-in failing. Returns whether az login succeeded.
+function Invoke-AzLogin {
+    $loginArgs = @('login')
+    if ($script:TenantId) { $loginArgs += @('--tenant', $script:TenantId) } else { $loginArgs += '--allow-no-subscriptions' }
+    if ($DeviceCode)      { $loginArgs += '--use-device-code' }
+    Show-AzCommand $loginArgs
+    & $script:AzExe @loginArgs | Out-Host
+    return ($LASTEXITCODE -eq 0)
+}
+# The enabled subscriptions of this sign-in. A tenant-level account (from --allow-no-subscriptions)
+# has the tenant's id as its id, so it is not one. (Filtered here, not with --query: az is a .cmd,
+# and cmd.exe would mangle the && and ! of a JMESPath filter.)
+function Get-Subscriptions {
+    $json = & $script:AzExe account list --output json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return @() }
+    return @(($json | Out-String | ConvertFrom-Json) | Where-Object { $_.state -eq 'Enabled' -and $_.id -ne $_.tenantId })
+}
+# Asks which directory (tenant) to use, from the ones this account belongs to. Sets $TenantId.
+function Select-Tenant {
+    # The Azure tenants API, through az rest: `az account tenant list` is an extension, not core.
+    $json = & $script:AzExe rest --method get --url 'https://management.azure.com/tenants?api-version=2022-12-01' --output json 2>$null
+    $tenants = @()
+    # The ( ) and ForEach-Object unroll the list: PowerShell 5.1's ConvertFrom-Json returns a JSON
+    # array as one object.
+    if ($LASTEXITCODE -eq 0 -and $json) {
+        $parsed = $json | Out-String | ConvertFrom-Json
+        if ($parsed.value) { $tenants = @(($parsed.value) | ForEach-Object { $_ }) }
+    }
+    if ($tenants.Count -eq 1) {
+        $script:TenantId = $tenants[0].tenantId
+        Info "Using your only directory: $(if ($tenants[0].displayName) { $tenants[0].displayName } else { $tenants[0].tenantId })"
+        return
+    }
+    if ($tenants.Count -gt 1) {
+        Write-Host ''
+        Write-Host '  Your account belongs to these directories (tenants):' -ForegroundColor Cyan
+        for ($i = 0; $i -lt $tenants.Count; $i++) {
+            $t = $tenants[$i]
+            $label = if ($t.displayName) { $t.displayName } else { '(no name)' }
+            Write-Host ("  {0}) {1}  {2}  {3}" -f ($i + 1), $label, $t.defaultDomain, $t.tenantId)
+        }
+        Write-Host ''
+        $pick = Read-Host "Which directory has your Azure subscription? (1-$($tenants.Count))"
+        $n = 0
+        if (-not [int]::TryParse($pick, [ref]$n) -or $n -lt 1 -or $n -gt $tenants.Count) { Fail "Invalid choice '$pick'." }
+        $script:TenantId = $tenants[$n - 1].tenantId
+        return
+    }
+    # The list is not available (for example, the sign-in itself was refused): ask for the ID.
+    Write-Host '  Azure could not list your directories. Find your tenant ID in the Azure portal:' -ForegroundColor Yellow
+    Write-Host '  Microsoft Entra ID > Overview > Tenant ID (or your domain, e.g. contoso.onmicrosoft.com).' -ForegroundColor Yellow
+    $entry = ((Read-Host 'Tenant ID or domain') -replace '\s', '')
+    if ($entry -notmatch '^[A-Za-z0-9.-]+$') { Fail "Invalid tenant '$entry'." }
+    $script:TenantId = $entry
+}
+
 Step 'Checking Azure sign-in'
-& $script:AzExe account show --output table
+& $script:AzExe account show --output none 2>$null
 $signedIn = ($LASTEXITCODE -eq 0)
 if ($signedIn -and $TenantId) {
     $current = & $script:AzExe account show --query tenantId -o tsv 2>$null
     if ($current -ne $TenantId) { Info "Switching directory to $TenantId."; $signedIn = $false }
 }
 if (-not $signedIn) {
-    $loginArgs = @('login')
-    if ($TenantId)   { $loginArgs += @('--tenant', $TenantId) }
-    if ($DeviceCode) { $loginArgs += '--use-device-code' }
-    Step 'Signing in to Azure (complete MFA and pick your subscription if asked)'
-    Show-AzCommand $loginArgs
-    & $script:AzExe @loginArgs
-    if ($LASTEXITCODE -ne 0) { Fail 'az login failed (see the Azure output above).' }
+    Step 'Signing in to Azure (complete MFA in the browser)'
+    if (-not (Invoke-AzLogin) -and $TenantId) {
+        Fail 'az login failed (see the Azure output above).' @(
+            'Check the tenant ID, or run without -TenantId to pick a directory from a list.',
+            'Add -DeviceCode if the browser sign-in does not appear.')
+    }
 }
-& $script:AzExe account show --output none 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Fail 'Signed in, but no Azure subscription is available.' @(
-        'If Azure said you must use multi-factor authentication (AADSTS50076), re-run with -TenantId <tenant-id>.',
-        'Add -DeviceCode if the MFA prompt does not appear.')
+# No subscription here (wrong directory, or one that needs MFA): ask which directory to use and
+# sign in to it. A directory without a subscription asks again.
+$tries = 0
+while ((Get-Subscriptions).Count -eq 0) {
+    $tries++
+    if ($tries -gt 3) {
+        Fail 'No Azure subscription found in the directories tried.' @(
+            'Create one at https://portal.azure.com (Subscriptions > Add), then run this again.')
+    }
+    if ($tries -eq 1) { Info 'This sign-in has no Azure subscription yet. Pick the directory that has one.' }
+    else { Warn 'There is no enabled Azure subscription in that directory.' }
+    $TenantId = ''
+    Select-Tenant
+    Step "Signing in to directory $TenantId (complete MFA in the browser)"
+    if (-not (Invoke-AzLogin)) { Fail 'az login failed (see the Azure output above).' @('Add -DeviceCode if the browser sign-in does not appear.') }
 }
-$sub = Invoke-AzRead account show --query '{name:name, tenant:tenantId}' --output json | ConvertFrom-Json
-Ok "Subscription: $($sub.name)"
+# A tenant-level account can still be the default after --allow-no-subscriptions: switch to a
+# real subscription.
+$sub = Invoke-AzRead account show --query '{id:id, name:name, tenant:tenantId}' --output json | ConvertFrom-Json
+if ($sub.id -eq $sub.tenant) {
+    $first = (Get-Subscriptions)[0]
+    & $script:AzExe account set --subscription $first.id
+    $sub = [pscustomobject]@{ id = $first.id; name = $first.name; tenant = $first.tenantId }
+}
+Ok "Subscription: $($sub.name)  (directory $($sub.tenant))"
 
 # ================================================================ actions other than Deploy
 function Show-Info($o) {

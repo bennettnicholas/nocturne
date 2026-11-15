@@ -321,26 +321,91 @@ show_info() {
 }
 
 # ------------------------------------------------------------------ 2. sign in
+# az login, into $TENANT_ID when set. Without one, --allow-no-subscriptions lets the sign-in
+# succeed even when the default directory has no subscription (or wants MFA), so the directory
+# picker can run afterwards instead of the sign-in failing.
+az_login() {
+  set -- login
+  if [ -n "$TENANT_ID" ]; then set -- "$@" --tenant "$TENANT_ID"; else set -- "$@" --allow-no-subscriptions; fi
+  if [ "$DEVICE_CODE" = 1 ]; then set -- "$@" --use-device-code; fi
+  show_az "$*"
+  "$AZ" "$@"
+}
+
+# True when the sign-in has an enabled subscription. A tenant-level account (from
+# --allow-no-subscriptions) has the tenant's id as its id, so it does not count.
+has_subscription() {
+  local n
+  n=$("$AZ" account list --query "length([?state=='Enabled' && id!=tenantId])" -o tsv 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n" -gt 0 ]
+}
+
+# Asks which directory (tenant) to use, from the ones this account belongs to. Sets TENANT_ID.
+pick_tenant() {
+  local count pick
+  # The Azure tenants API, through az rest: `az account tenant list` is an extension, not core.
+  if "$AZ" rest --method get --url 'https://management.azure.com/tenants?api-version=2022-12-01' -o json > "$WORK/tenants-raw.json" 2>/dev/null \
+    && jq '.value // []' "$WORK/tenants-raw.json" > "$WORK/tenants.json" 2>/dev/null \
+    && count=$(jq 'length' "$WORK/tenants.json" 2>/dev/null) && [ "${count:-0}" -gt 0 ]; then
+    if [ "$count" -eq 1 ]; then
+      TENANT_ID=$(jq -r '.[0].tenantId' "$WORK/tenants.json")
+      info "Using your only directory: $(jq -r '.[0].displayName // .[0].tenantId' "$WORK/tenants.json")"
+      return 0
+    fi
+    say ''
+    say '  Your account belongs to these directories (tenants):' "$C_CYAN"
+    jq -r 'to_entries[] | "  \(.key + 1)) \(.value.displayName // "(no name)")  \(.value.defaultDomain // "")  \(.value.tenantId)"' "$WORK/tenants.json"
+    say ''
+    ask "Which directory has your Azure subscription? (1-$count) "
+    pick=$REPLY
+    case "$pick" in ''|*[!0-9]*) fail "Invalid choice '$pick'." ;; esac
+    { [ "$pick" -ge 1 ] && [ "$pick" -le "$count" ]; } || fail "Invalid choice '$pick'."
+    TENANT_ID=$(jq -r --argjson i "$((pick - 1))" '.[$i].tenantId' "$WORK/tenants.json")
+    return 0
+  fi
+  # The list is not available (for example, the sign-in itself was refused): ask for the ID.
+  say '  Azure could not list your directories. Find your tenant ID in the Azure portal:' "$C_YELLOW"
+  say '  Microsoft Entra ID > Overview > Tenant ID (or your domain, e.g. contoso.onmicrosoft.com).' "$C_YELLOW"
+  ask 'Tenant ID or domain: '
+  pick=$(printf '%s' "$REPLY" | tr -d '[:space:]')
+  case "$pick" in ''|*[!A-Za-z0-9.-]*) fail "Invalid tenant '$pick'." ;; esac
+  TENANT_ID=$pick
+}
+
 sign_in() {
   step 'Checking Azure sign-in'
-  local signed_in=0 current
-  if "$AZ" account show --output table; then signed_in=1; fi
+  local signed_in=0 current tries=0
+  if "$AZ" account show --output none 2>/dev/null; then signed_in=1; fi
   if [ "$signed_in" = 1 ] && [ -n "$TENANT_ID" ]; then
     current=$("$AZ" account show --query tenantId -o tsv 2>/dev/null)
     if [ "$current" != "$TENANT_ID" ]; then info "Switching directory to $TENANT_ID."; signed_in=0; fi
   fi
   if [ "$signed_in" = 0 ]; then
-    step 'Signing in to Azure (complete MFA and pick your subscription if asked)'
-    set -- login
-    if [ -n "$TENANT_ID" ]; then set -- "$@" --tenant "$TENANT_ID"; fi
-    if [ "$DEVICE_CODE" = 1 ]; then set -- "$@" --use-device-code; fi
-    show_az "$*"
-    "$AZ" "$@" || fail 'az login failed (see the Azure output above).'
+    step 'Signing in to Azure (complete MFA in the browser)'
+    az_login || [ -z "$TENANT_ID" ] || fail 'az login failed (see the Azure output above).' \
+      'Check the tenant ID, or run without --tenant-id to pick a directory from a list.' \
+      'Add --device-code if the browser sign-in does not appear.'
   fi
-  "$AZ" account show --output none 2>/dev/null || fail 'Signed in, but no Azure subscription is available.' \
-    'If Azure said you must use multi-factor authentication (AADSTS50076), re-run with --tenant-id <tenant-id>.' \
-    'Add --device-code if the MFA prompt does not appear.'
-  ok "Subscription: $("$AZ" account show --query name -o tsv 2>/dev/null)"
+  # No subscription here (wrong directory, or one that needs MFA): ask which directory to use and
+  # sign in to it. A directory without a subscription asks again.
+  while ! has_subscription; do
+    tries=$((tries + 1))
+    [ "$tries" -le 3 ] || fail 'No Azure subscription found in the directories tried.' \
+      'Create one at https://portal.azure.com (Subscriptions > Add), then run this again.'
+    if [ "$tries" -gt 1 ]; then warn "There is no enabled Azure subscription in that directory."; fi
+    [ "$tries" -gt 1 ] || info 'This sign-in has no Azure subscription yet. Pick the directory that has one.'
+    TENANT_ID=''
+    pick_tenant
+    step "Signing in to directory $TENANT_ID (complete MFA in the browser)"
+    az_login || fail 'az login failed (see the Azure output above).' 'Add --device-code if the browser sign-in does not appear.'
+  done
+  # A tenant-level account can still be the default after --allow-no-subscriptions: switch to a
+  # real subscription.
+  if [ "$("$AZ" account show --query 'id==tenantId' -o tsv 2>/dev/null)" = true ]; then
+    "$AZ" account set --subscription "$("$AZ" account list --query "[?state=='Enabled' && id!=tenantId] | [0].id" -o tsv)"
+  fi
+  ok "Subscription: $("$AZ" account show --query name -o tsv 2>/dev/null)  (directory $("$AZ" account show --query tenantId -o tsv 2>/dev/null))"
 }
 
 # ------------------------------------------------------------------ actions other than deploy
