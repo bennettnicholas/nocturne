@@ -1,10 +1,10 @@
 #!/bin/bash
 # get-nocturne.sh - one-line installer for macOS (and Linux).
 #
-#   curl -fsSL https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud/get-nocturne.sh | bash
 #
 # With options (passed to deploy-nocturne-azure.sh):
-#   curl -fsSL https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.sh | bash -s -- --tenant-id <tenant-id>
+#   curl -fsSL https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud/get-nocturne.sh | bash -s -- --tenant-id <tenant-id>
 #
 # Downloads the toolkit files from GitHub into ~/nocturne-azure (an update keeps your secrets/
 # folder), then runs deploy-nocturne-azure.sh. Re-run it any time to update and deploy again.
@@ -15,8 +15,8 @@ set -euo pipefail
 main() {
 
   # Where the toolkit is published (override with environment variables for testing):
-  REPO="${NOCTURNE_TOOLS_REPO:-bennettnicholas/nocturne}"
-  BRANCH="${NOCTURNE_TOOLS_BRANCH:-azure-cloud-deploymentscripts}"   # or a release tag for a fixed version
+  REPO="${NOCTURNE_TOOLS_REPO:-nightscout/nocturne}"
+  BRANCH="${NOCTURNE_TOOLS_BRANCH:-main}"   # or a release tag for a fixed version
   BASE_URL="${NOCTURNE_TOOLS_BASE_URL:-https://raw.githubusercontent.com/$REPO/$BRANCH/deploy/azure-cloud}"
   DEST="${NOCTURNE_TOOLS_DIR:-$HOME/nocturne-azure}"
 

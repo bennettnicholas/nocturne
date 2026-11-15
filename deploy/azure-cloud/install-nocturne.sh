@@ -106,6 +106,7 @@ install_docker() {
   # ...otherwise Docker's official repository (e.g. Debian, whose compose is too old).
   if ! compose_ok; then
     log "using Docker's official apt repository"
+    # shellcheck source=/dev/null
     . /etc/os-release
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
@@ -182,7 +183,7 @@ wait_healthy() {
   log "waiting for containers to become healthy (up to ${TIMEOUT_MIN} min)"
   while true; do
     now="$(docker compose ps -a --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null | sort)"
-    [ "$now" != "$last" ] && { echo "$now" | sed 's/^/    /'; last="$now"; }
+    [ "$now" != "$last" ] && { printf '%s\n' "$now" | awk '{ print "    " $0 }'; last="$now"; }
     # Not ready: anything starting, unhealthy, restarting or exited.
     pending="$(echo "$now" | awk '$2!="running" || $3=="starting" || $3=="unhealthy"')"
     if [ -n "$now" ] && [ -z "$pending" ]; then log "all containers are running"; return 0; fi
@@ -218,6 +219,7 @@ main() {
   exec > >(tee -a "$LOG") 2>&1
 
   log "Nocturne install starting ($(uname -m))"
+  # shellcheck source=/dev/null
   [ -r /etc/os-release ] && . /etc/os-release
   case " ${ID:-} ${ID_LIKE:-} " in
     *" debian "*|*" ubuntu "*) ;;

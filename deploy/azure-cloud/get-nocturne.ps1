@@ -1,9 +1,9 @@
 # get-nocturne.ps1 - one-line installer for Windows.
 #
-#   irm https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.ps1 | iex
+#   irm https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud/get-nocturne.ps1 | iex
 #
 # With options (passed to Deploy-NocturneAzure.ps1):
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.ps1))) -TenantId <tenant-id>
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud/get-nocturne.ps1))) -TenantId <tenant-id>
 #
 # Downloads the toolkit files from GitHub into %USERPROFILE%\nocturne-azure (an update keeps your
 # secrets\ folder), then runs Deploy-NocturneAzure.ps1. Re-run it any time to update and deploy again.
@@ -11,8 +11,8 @@
 # Where the toolkit is published (override with environment variables for testing):
 param([Parameter(ValueFromRemainingArguments = $true)] $DeployArgs)
 
-$Repo    = 'bennettnicholas/nocturne'
-$Branch  = 'azure-cloud-deploymentscripts'   # or a release tag for a fixed version
+$Repo    = 'nightscout/nocturne'
+$Branch  = 'main'                # or a release tag for a fixed version
 $Folder  = 'deploy/azure-cloud'               # the toolkit's folder in the repository
 if ($env:NOCTURNE_TOOLS_REPO)   { $Repo = $env:NOCTURNE_TOOLS_REPO }
 if ($env:NOCTURNE_TOOLS_BRANCH) { $Branch = $env:NOCTURNE_TOOLS_BRANCH }

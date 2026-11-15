@@ -18,7 +18,7 @@
 
     // Where the one-line installers are published: deploy/azure-cloud in the repository.
     // @wc-ignore
-    const TOOLKIT = "https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud";
+    const TOOLKIT = "https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud";
     // @wc-ignore
     const FALLBACK_DOMAIN = "nocturne.example.com";
 
@@ -93,9 +93,10 @@
         Docker knowledge needed. Most people pay about $20–35 a month.
     </p>
     <p class="text-muted-foreground mb-8">
-        On the server, it runs the same
+        On the server, it installs the same Docker Compose release as every other guide. If you
+        already have a Linux server, use the
         <a href={resolve("/docs/installation/install-script")} class="text-primary hover:underline">install script</a>
-        as any other Linux server. If you have a server, use that guide.
+        guide instead.
     </p>
 
     <h2 class="text-2xl font-bold mt-8 mb-4">What you need</h2>
@@ -178,7 +179,7 @@
             <li>Creates the server, its network, a firewall and a static IP address, all in one resource group named <strong>rg-nocturne</strong></li>
             <li>Opens only ports 80 and 443 to the internet, and SSH only to your current IP address. Password login is off</li>
             <li>Uses Trusted Launch (secure boot and vTPM) where the size supports it</li>
-            <li>On the server, runs the install script on first boot. It installs Docker, downloads the latest Nocturne release and starts it</li>
+            <li>On first boot, the server installs Docker, downloads the latest Nocturne release and starts it</li>
             <li>Follows the install, waits until HTTPS works, and prints your address</li>
         </ul>
     </details>

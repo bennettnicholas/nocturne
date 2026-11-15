@@ -1,0 +1,2 @@
+# The deploy scripts keep each deployment's generated passwords here. Never commit them.
+secrets/

@@ -63,7 +63,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The commands this script prints for later (remove, logs, ...) are the one-line installer from
 # GitHub with an action, so they work on any computer, from any folder. get-nocturne.sh passes
 # its own address, so a fork or another branch prints its own.
-GET_URL="${NOCTURNE_GET_URL:-https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.sh}"
+GET_URL="${NOCTURNE_GET_URL:-https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud/get-nocturne.sh}"
 SELF="curl -fsSL $GET_URL | bash -s --"
 TEMPLATE="$HERE/infra/nocturne-vm.bicep"
 INSTALLER="$HERE/install-nocturne.sh"

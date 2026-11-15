@@ -16,8 +16,7 @@
       6. Follows the install from here, then checks Nocturne answers over HTTPS.
 
     Nocturne runs from its official Docker Compose release bundle: PostgreSQL, API, web app,
-    gateway, Caddy (automatic HTTPS) and Watchtower (automatic updates). This is a real instance,
-    not the Aspire dev environment that Deploy-Nocturne.ps1 sets up.
+    gateway, Caddy (automatic HTTPS) and Watchtower (automatic updates).
 
     Address:
       - No -Domain: the free Azure name https://<name>-<hash>.<region>.cloudapp.azure.com
@@ -87,7 +86,7 @@ $SecretsFile = Join-Path $SecretsDir "$ResourceGroup.env"
 # The commands this script prints for later (remove, logs, ...) are the one-line installer from
 # GitHub with an action, so they work on any computer, from any folder. get-nocturne.ps1 passes
 # its own address, so a fork or another branch prints its own.
-$GetUrl      = 'https://raw.githubusercontent.com/bennettnicholas/nocturne/azure-cloud-deploymentscripts/deploy/azure-cloud/get-nocturne.ps1'
+$GetUrl      = 'https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud/get-nocturne.ps1'
 if ($env:NOCTURNE_GET_URL) { $GetUrl = $env:NOCTURNE_GET_URL }
 $GetCommand  = "irm $GetUrl | iex"
 $Self        = "& ([scriptblock]::Create((irm $GetUrl)))"
