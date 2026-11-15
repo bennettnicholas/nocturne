@@ -54,6 +54,14 @@ param postgresMigratorPassword string
 @secure()
 param postgresWebPassword string
 
+@description('API image to run instead of the release\'s, e.g. a branch build. Empty = the release\'s. Give with webImage.')
+param apiImage string = ''
+
+@description('Web image to run instead of the release\'s. Empty = the release\'s. Give with apiImage.')
+param webImage string = ''
+
+var imageArgs = empty(apiImage) ? '' : ' --api-image ${apiImage} --web-image ${webImage}'
+
 // Free Azure DNS name: <name>-<hash>.<region>.cloudapp.azure.com. The hash is stable per resource
 // group, so re-deploying keeps the same address (and the same Let's Encrypt certificate).
 var dnsLabel = toLower('${name}-${uniqueString(resourceGroup().id)}')
@@ -67,7 +75,7 @@ var secretsEnv = 'BASE_DOMAIN=${baseDomain}\nINSTANCE_KEY=${instanceKey}\nPOSTGR
 // to /opt/nocturne so it can be re-run later, writes the secrets readable by root only, and runs
 // the installer, which deletes the secrets file once .env exists.
 // replace('\r', '') keeps it valid bash even if this file is saved with Windows line endings.
-var bootScript = replace(replace(replace('''#!/bin/bash
+var bootScript = replace(replace(replace(replace('''#!/bin/bash
 set -euo pipefail
 mkdir -p /opt/nocturne
 chmod 700 /opt/nocturne
@@ -75,8 +83,8 @@ umask 077
 echo '__INSTALLER_B64__' | base64 -d > /opt/nocturne/install-nocturne.sh
 echo '__SECRETS_B64__' | base64 -d > /opt/nocturne/secrets.env
 chmod 700 /opt/nocturne/install-nocturne.sh
-/opt/nocturne/install-nocturne.sh --secrets-file /opt/nocturne/secrets.env --remove-secrets-file
-''', '\r', ''), '__INSTALLER_B64__', loadFileAsBase64('../install-nocturne.sh')), '__SECRETS_B64__', base64(secretsEnv))
+/opt/nocturne/install-nocturne.sh --secrets-file /opt/nocturne/secrets.env --remove-secrets-file__IMAGE_ARGS__
+''', '\r', ''), '__INSTALLER_B64__', loadFileAsBase64('../install-nocturne.sh')), '__SECRETS_B64__', base64(secretsEnv)), '__IMAGE_ARGS__', imageArgs)
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: '${name}-nsg'

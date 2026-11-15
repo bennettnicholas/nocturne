@@ -19,6 +19,13 @@
     gateway, Caddy (automatic HTTPS) and Watchtower (automatic updates). This is a real instance,
     not the Aspire dev environment that Deploy-Nocturne.ps1 sets up.
 
+    Re-running Deploy when the VM already exists (and its first install finished) updates it in
+    place: the installer runs again with the images below, and .env and the data are kept.
+
+    Images: -ApiImage and -WebImage (or NOCTURNE_API_IMAGE / NOCTURNE_WEB_IMAGE, which
+    get-nocturne.ps1 sets from branch.env, written by Publish-BranchImages.ps1) run a branch build
+    instead of the release. -OfficialImages goes back to the release's images.
+
     Address:
       - No -Domain: the free Azure name https://<name>-<hash>.<region>.cloudapp.azure.com
         (one tenant at the root; Azure DNS names cannot have tenant subdomains).
@@ -36,6 +43,10 @@
     .\Deploy-NocturneAzure.ps1 -Action Logs        # container status and recent logs
 .EXAMPLE
     .\Deploy-NocturneAzure.ps1 -Action Reinstall   # upload the current install-nocturne.sh and re-run it
+.EXAMPLE
+    .\Deploy-NocturneAzure.ps1 -ApiImage ghcr.io/me/nocturne/nocturne-api:branch-feature-x -WebImage ghcr.io/me/nocturne/nocturne-web:branch-feature-x
+.EXAMPLE
+    .\Deploy-NocturneAzure.ps1 -OfficialImages     # back to the release's images
 .EXAMPLE
     .\Deploy-NocturneAzure.ps1 -Action Ssh         # shell on the VM
 .EXAMPLE
@@ -58,7 +69,10 @@ param(
     [string]$TenantId = '',
     [switch]$DeviceCode,
     [switch]$Yes,                         # skip the cost confirmation (the estimate is still shown)
-    [int]$TimeoutMinutes = 30
+    [int]$TimeoutMinutes = 30,
+    [string]$ApiImage = '',               # empty = NOCTURNE_API_IMAGE, else the release's
+    [string]$WebImage = '',               # empty = NOCTURNE_WEB_IMAGE, else the release's
+    [switch]$OfficialImages
 )
 
 $ErrorActionPreference = 'Continue'
@@ -93,6 +107,28 @@ $GetCommand  = "irm $GetUrl | iex"
 $Self        = "& ([scriptblock]::Create((irm $GetUrl)))"
 $Deployment  = 'nocturne'
 $VmName      = "$Name-vm"
+
+# The images to run, and the installer options that select them. No images = the installer keeps
+# whatever the VM's .env has (on a new VM, the release's).
+if (-not $ApiImage -and $env:NOCTURNE_API_IMAGE) { $ApiImage = $env:NOCTURNE_API_IMAGE }
+if (-not $WebImage -and $env:NOCTURNE_WEB_IMAGE) { $WebImage = $env:NOCTURNE_WEB_IMAGE }
+if (-not $ApiImage -and $env:NOCTURNE_OFFICIAL_IMAGES -eq '1') { $OfficialImages = $true }
+if ($OfficialImages) { $ApiImage = ''; $WebImage = '' }
+$ImagePattern = '^[a-z0-9]([a-z0-9._/-]*[a-z0-9])?(:[A-Za-z0-9_.-]{1,128}|@sha256:[a-f0-9]{64})$'
+if ([bool]$ApiImage -ne [bool]$WebImage) { Fail 'Give -ApiImage and -WebImage together.' }
+foreach ($img in @($ApiImage, $WebImage)) {
+    if ($img -and $img -cnotmatch $ImagePattern) { Fail "Not an image reference: $img" }
+}
+$InstallerImageArgs = ''
+if ($OfficialImages) { $InstallerImageArgs = ' --official-images' }
+elseif ($ApiImage) { $InstallerImageArgs = " --api-image $ApiImage --web-image $WebImage" }
+
+# Uploads the current install-nocturne.sh to the VM and runs it with the image options. Keeps .env
+# and the data. Returns the installer's last lines, or $null when the VM could not be reached.
+function Invoke-Reinstall {
+    $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Installer))
+    return Invoke-VmShell "echo '$b64' | base64 -d > /opt/nocturne/install-nocturne.sh && chmod 700 /opt/nocturne/install-nocturne.sh && /opt/nocturne/install-nocturne.sh$InstallerImageArgs > /tmp/nocturne-reinstall.out 2>&1; code=`$?; tail -n 25 /tmp/nocturne-reinstall.out; exit `$code"
+}
 
 # Memory tiers offered in the size menu: the cheapest size YOUR subscription can use with at least
 # this much RAM. Nocturne needs 2 GB minimum, 4 GB recommended.
@@ -424,8 +460,7 @@ if ($Action -ne 'Deploy') {
         }
         'Reinstall' {
             Step 'Uploading install-nocturne.sh to the VM and re-running it (keeps .env and data)'
-            $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Installer))
-            $out = Invoke-VmShell "echo '$b64' | base64 -d > /opt/nocturne/install-nocturne.sh && chmod 700 /opt/nocturne/install-nocturne.sh && /opt/nocturne/install-nocturne.sh > /tmp/nocturne-reinstall.out 2>&1; code=`$?; tail -n 25 /tmp/nocturne-reinstall.out; exit `$code"
+            $out = Invoke-Reinstall
             if ($null -eq $out) { Fail 'The installer failed or the VM could not be reached.' @("Details:  $Self -Action Logs") }
             Write-Host $out
             if ($out -match 'NOCTURNE_INSTALL_DONE') { Ok 'Reinstall finished' } else { Fail 'Reinstall did not finish (output above).' }
@@ -450,6 +485,30 @@ $installerText = [IO.File]::ReadAllText($Installer)
 if ($installerText.Contains("`r")) {
     [IO.File]::WriteAllText($Installer, $installerText.Replace("`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
     Info 'Converted install-nocturne.sh to Unix line endings'
+}
+
+if ($ApiImage) { Info "Images: $ApiImage, $WebImage" }
+elseif ($OfficialImages) { Info "Images: the release's" }
+
+# An existing VM whose first install finished is updated in place: custom data only runs on first
+# boot, so re-applying the template would change nothing on it.
+$existing = Get-DeploymentOutputs
+if ($existing) {
+    Step "Nocturne is already deployed in '$ResourceGroup': checking its install"
+    $done = Invoke-VmShell 'grep -c NOCTURNE_INSTALL_DONE /var/log/nocturne-install.log 2>/dev/null || echo 0'
+    if ($done -match '^\s*[1-9]') {
+        Step 'Updating Nocturne on the VM (keeps .env and data) - a few minutes'
+        $out = Invoke-Reinstall
+        if ($null -eq $out) { Fail 'The update failed or the VM could not be reached.' @("Details:  $Self -Action Logs") }
+        Write-Host $out
+        if ($out -notmatch 'NOCTURNE_INSTALL_DONE') { Fail 'The update did not finish (output above).' @("Details:  $Self -Action Logs") }
+        Ok 'Nocturne is updated'
+        Show-Info $existing
+        Write-Host ''
+        Write-Host "  For a new VM instead, remove this one first:  $Self -Action Remove" -ForegroundColor Gray
+        exit 0
+    }
+    Warn 'The first install has not finished on this VM, so the normal deploy continues.'
 }
 
 Step 'Your public IP (SSH is only allowed from here)'
@@ -637,6 +696,8 @@ $params = @{
         postgresAppPassword      = @{ value = $secrets['POSTGRES_APP_PASSWORD'] }
         postgresMigratorPassword = @{ value = $secrets['POSTGRES_MIGRATOR_PASSWORD'] }
         postgresWebPassword      = @{ value = $secrets['POSTGRES_WEB_PASSWORD'] }
+        apiImage                 = @{ value = $ApiImage }
+        webImage                 = @{ value = $WebImage }
     }
 }
 $paramFile = Join-Path $env:TEMP "nocturne-params-$PID.json"

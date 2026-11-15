@@ -1,0 +1,258 @@
+# Builds the API and web images from a feature branch and pushes them to this repository's
+# GitHub Container Registry, so a test server can run the branch before it is merged or released.
+#
+#   push to feature/<name>   ghcr.io/<owner>/<repo>/nocturne-api:branch-feature-<name>
+#                            ghcr.io/<owner>/<repo>/nocturne-web:branch-feature-<name>
+#                            (and :sha-<sha7> on both, which never moves)
+#
+# deploy/azure-cloud/Publish-BranchImages.ps1 pushes the branch, waits for this workflow and records
+# the image names for the Azure toolkit. The branch tag moves with every push, so a server on it
+# also picks up later pushes through Watchtower.
+#
+# The steps follow docker-publish.yml, without the demo image and the release tagging.
+name: Branch images
+
+on:
+  push:
+    branches: ["feature/**"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_REPOSITORY: ${{ github.repository }}
+  DOTNET_VERSION: "11.0.x"
+  NODE_VERSION: "24"
+  PNPM_VERSION: "11.5.0"
+
+concurrency:
+  group: branch-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tags:
+    runs-on: ubuntu-latest
+    outputs:
+      branch_tag: ${{ steps.tags.outputs.branch_tag }}
+      sha_tag: ${{ steps.tags.outputs.sha_tag }}
+      repository: ${{ steps.tags.outputs.repository }}
+    steps:
+      - name: Determine image tags
+        id: tags
+        run: |
+          # Registry names must be lowercase; a tag holds [A-Za-z0-9_.-] and at most 128 characters.
+          slug="$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//' | cut -c1-100)"
+          echo "branch_tag=branch-${slug}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "repository=$(printf '%s' "$IMAGE_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+  api-image:
+    needs: tags
+    # The native library links against the runner's glibc, which must be no newer than the API
+    # base image's (see docker-publish.yml).
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REPO: ${{ needs.tags.outputs.repository }}
+      BRANCH_TAG: ${{ needs.tags.outputs.branch_tag }}
+      SHA_TAG: ${{ needs.tags.outputs.sha_tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: nuget-branch-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props') }}
+          restore-keys: nuget-
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Add the aarch64 target to the pinned toolchain
+        working-directory: crates
+        run: rustup target add aarch64-unknown-linux-gnu
+
+      - name: Install aarch64 cross-linker
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.lock', 'crates/**/*.rs', 'crates/**/Cargo.toml') }}
+
+      - name: Build nocturne_alerts native library
+        working-directory: crates
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release -p nocturne-alerts-ffi
+          cargo build --release -p nocturne-alerts-ffi --target aarch64-unknown-linux-gnu
+          test -f target/release/libnocturne_alerts.so
+          test -f target/aarch64-unknown-linux-gnu/release/libnocturne_alerts.so
+
+      # Pushed to the sha tag first: dotnet publish pushes each platform before the index, so a
+      # server polling the branch tag must only see it once both platforms are there.
+      - name: Build and push Nocturne.API container
+        working-directory: src/API/Nocturne.API
+        run: |
+          dotnet publish \
+            -c Release \
+            -p:PublishProfile=DefaultContainer \
+            '-p:ContainerRuntimeIdentifiers="linux-x64;linux-arm64"' \
+            -p:ContainerRegistry=${{ env.REGISTRY }} \
+            -p:ContainerRepository=${REPO}/nocturne-api \
+            -p:GenerateNSwagClient=false \
+            "-p:ContainerImageTags=${SHA_TAG}" \
+            "-p:ContainerGitCommit=${GITHUB_SHA}" \
+            "-p:ContainerBuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Verify the API image loads the nocturne_alerts native library
+        run: |
+          set -euo pipefail
+          ref="${REGISTRY}/${REPO}/nocturne-api:${SHA_TAG}"
+          probe="$RUNNER_TEMP/alerts-native-probe"
+          dotnet publish scripts/alerts-native-probe.cs -o "$probe"
+          find "$probe" -name '*nocturne_alerts*' -delete
+          for pair in "linux/amd64:linux-x64" "linux/arm64:linux-arm64"; do
+            platform="${pair%%:*}"
+            rid="${pair##*:}"
+            docker pull --quiet --platform "$platform" "$ref" >/dev/null
+            docker run --rm --platform "$platform" --entrypoint dotnet \
+              -v "$probe:/probe:ro" \
+              -e NOCTURNE_ALERTS_NATIVE_DIR="/app/runtimes/${rid}/native" \
+              "$ref" /probe/alerts-native-probe.dll
+          done
+
+      - name: Point the branch tag at this build
+        run: |
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/${REPO}/nocturne-api:${BRANCH_TAG}" \
+            "${REGISTRY}/${REPO}/nocturne-api:${SHA_TAG}"
+
+  web-image:
+    needs: tags
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REPO: ${{ needs.tags.outputs.repository }}
+      BRANCH_TAG: ${{ needs.tags.outputs.branch_tag }}
+      SHA_TAG: ${{ needs.tags.outputs.sha_tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: nuget-branch-web-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props') }}
+          restore-keys: nuget-
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
+          cache: "pnpm"
+          cache-dependency-path: src/Web/pnpm-lock.yaml
+
+      - name: Install web dependencies
+        working-directory: src/Web
+        run: pnpm install --frozen-lockfile
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate API client for web build
+        working-directory: src/API/Nocturne.API
+        run: dotnet build -c Release
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/Web/vendor/water-ui/target
+          key: cargo-wasm-${{ runner.os }}-${{ hashFiles('src/Web/vendor/water-ui/Cargo.lock', 'src/Web/vendor/water-ui/crates/**/*.rs', 'src/Web/vendor/water-ui/crates/**/Cargo.toml') }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.128
+
+      - name: Install binaryen (wasm-opt)
+        run: npm install -g binaryen
+
+      - name: Build watercolour wasm
+        working-directory: src/Web
+        run: pnpm --filter water-ui build:wasm
+
+      # buildx pushes the multi-platform index in one write, so both tags are safe to push at once.
+      - name: Build and push Nocturne.Web container
+        run: |
+          CACHE_REF="${REGISTRY}/${REPO}/nocturne-web:buildcache"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --tag "${REGISTRY}/${REPO}/nocturne-web:${SHA_TAG}" \
+            --tag "${REGISTRY}/${REPO}/nocturne-web:${BRANCH_TAG}" \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max" \
+            --file Dockerfile.web \
+            --push \
+            .
+
+  summary:
+    needs: [tags, api-image, web-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize the images
+        run: |
+          {
+            echo "### Branch images"
+            echo ""
+            echo "- \`${REGISTRY}/${{ needs.tags.outputs.repository }}/nocturne-api:${{ needs.tags.outputs.branch_tag }}\`"
+            echo "- \`${REGISTRY}/${{ needs.tags.outputs.repository }}/nocturne-web:${{ needs.tags.outputs.branch_tag }}\`"
+            echo ""
+            echo "This commit only: \`${{ needs.tags.outputs.sha_tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

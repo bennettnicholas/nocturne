@@ -19,10 +19,15 @@
 #   --dir DIR               Install folder (default /opt/nocturne).
 #   --release-url URL       Where to download the bundle (default: latest GitHub release).
 #   --timeout MINUTES       How long to wait for the containers to become healthy (default 15).
+#   --api-image REF         Run this API image instead of the release's (e.g. a branch build:
+#                           ghcr.io/<owner>/<repo>/nocturne-api:branch-feature-x). Kept in .env.
+#   --web-image REF         The same for the web image. Give both together.
+#   --official-images       Go back to the release's images.
 #   -h, --help              Show this help.
 #
 # Safe to re-run: an existing .env is kept (the database was created with its passwords) and the
-# bundle is refreshed to the latest release.
+# bundle is refreshed to the latest release. Images set with --api-image/--web-image stay until
+# --official-images or other images are given.
 #
 # Log: /var/log/nocturne-install.log. The last line is NOCTURNE_INSTALL_DONE on success.
 
@@ -34,6 +39,9 @@ SECRETS_FILE=""
 REMOVE_SECRETS=0
 RELEASE_URL="https://github.com/nightscout/nocturne/releases/latest/download"
 TIMEOUT_MIN=15
+API_IMAGE=""
+WEB_IMAGE=""
+OFFICIAL_IMAGES=0
 MIN_COMPOSE=2.23.1          # the release bundle uses compose "configs: content:"
 LOG=/var/log/nocturne-install.log
 REQUIRED_KEYS="BASE_DOMAIN INSTANCE_KEY POSTGRES_PASSWORD POSTGRES_APP_PASSWORD POSTGRES_MIGRATOR_PASSWORD POSTGRES_WEB_PASSWORD"
@@ -83,6 +91,33 @@ build_env() {
 
 # env_value FILE KEY: print KEY's value from a KEY=value file.
 env_value() { sed -n "s/^$2=//p" "$1" | head -n1; }
+
+# set_env_value FILE KEY VALUE: replace KEY's line in FILE, or append it.
+set_env_value() {
+  if grep -q "^$2=" "$1"; then sed -i "s|^$2=.*|$2=$3|" "$1"; else echo "$2=$3" >> "$1"; fi
+}
+
+# valid_image REF: a registry/repository:tag or @digest reference, with no characters that could
+# break the .env line or the sed above.
+valid_image() { [[ "$1" =~ ^[a-z0-9]([a-z0-9._/-]*[a-z0-9])?(:[A-Za-z0-9_.-]{1,128}|@sha256:[a-f0-9]{64})$ ]]; }
+
+# apply_images: point .env at the images asked for, or back at the release's. Without either
+# option, .env keeps the images it has.
+apply_images() {
+  local key
+  if [ "$OFFICIAL_IMAGES" -eq 1 ]; then
+    for key in NOCTURNE_API_IMAGE NOCTURNE_WEB_IMAGE; do
+      set_env_value .env "$key" "$(env_value default.env.example "$key")"
+    done
+    log "using the release's images"
+  elif [ -n "$API_IMAGE$WEB_IMAGE" ]; then
+    set_env_value .env NOCTURNE_API_IMAGE "$API_IMAGE"
+    set_env_value .env NOCTURNE_WEB_IMAGE "$WEB_IMAGE"
+    log "using images $API_IMAGE and $WEB_IMAGE"
+  fi
+  log "API image: $(env_value .env NOCTURNE_API_IMAGE)"
+  log "web image: $(env_value .env NOCTURNE_WEB_IMAGE)"
+}
 
 compose_ok() {
   command -v docker >/dev/null 2>&1 || return 1
@@ -208,10 +243,20 @@ main() {
       --dir) DIR="${2:?}"; shift 2 ;;
       --release-url) RELEASE_URL="${2:?}"; shift 2 ;;
       --timeout) TIMEOUT_MIN="${2:?}"; shift 2 ;;
+      --api-image) API_IMAGE="${2:?}"; shift 2 ;;
+      --web-image) WEB_IMAGE="${2:?}"; shift 2 ;;
+      --official-images) OFFICIAL_IMAGES=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
   done
+
+  if [ -n "$API_IMAGE$WEB_IMAGE" ]; then
+    { [ -n "$API_IMAGE" ] && [ -n "$WEB_IMAGE" ]; } || { echo "give --api-image and --web-image together" >&2; exit 2; }
+    [ "$OFFICIAL_IMAGES" -eq 0 ] || { echo "--official-images cannot be combined with --api-image/--web-image" >&2; exit 2; }
+    valid_image "$API_IMAGE" || { echo "not an image reference: $API_IMAGE" >&2; exit 2; }
+    valid_image "$WEB_IMAGE" || { echo "not an image reference: $WEB_IMAGE" >&2; exit 2; }
+  fi
 
   [ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0 $orig_args" >&2; exit 1; }
   touch "$LOG"; chmod 600 "$LOG"
@@ -233,6 +278,7 @@ main() {
   download docker-compose.yaml
   download default.env.example
   write_env
+  apply_images
   [ "$REMOVE_SECRETS" -eq 1 ] && [ -n "$SECRETS_FILE" ] && rm -f "$SECRETS_FILE"
 
   log "pulling images (a few minutes on first install)"
