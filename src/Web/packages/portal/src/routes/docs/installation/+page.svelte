@@ -52,6 +52,13 @@
       desc: "No server yet? One command in the browser makes a free one and runs the install script on it. No SSH or Docker knowledge needed.",
     },
     {
+      id: "azure",
+      href: resolve("/docs/installation/azure"),
+      logo: "/logos/azure.svg",
+      title: "Microsoft Azure",
+      desc: "One command on your Windows PC or Mac creates a server in your own Azure subscription, about $20–35 a month, and runs the install script on it.",
+    },
+    {
       id: "byo-postgres",
       href: resolve("/docs/installation/byo-postgres"),
       logo: "/logos/postgresql.svg",
@@ -118,7 +125,7 @@
     {/each}
   </ul>
   <p class="text-sm text-muted-foreground mt-4 mb-0">
-    Guides for GCP, Azure, Heroku, and other cloud platforms are coming soon.
+    Guides for GCP, Heroku, and other cloud platforms are coming soon.
   </p>
 
   <h2 class="text-2xl font-bold mt-12 mb-4">Managed instances</h2>

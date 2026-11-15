@@ -49,6 +49,7 @@ export const INSTALL_PLATFORM_IDS = [
   'docker-compose',
   'portainer',
   'oracle-cloud',
+  'azure',
   'byo-postgres',
   'reverse-proxy',
 ] as const;

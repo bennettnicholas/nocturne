@@ -22,6 +22,7 @@ export const DOCS_HERO: Record<string, DocsHero> = {
   'installation/docker-compose': { artwork: 'overlapping-shapes', palette: 'dusk' },
   'installation/portainer': { artwork: 'suitcase', palette: 'dusk' },
   'installation/oracle-cloud': { artwork: 'chat-bubble', palette: 'water' },
+  'installation/azure': { artwork: 'world-globe', palette: 'dusk' },
   'installation/byo-postgres': { artwork: 'key', palette: 'ember', wrap: false },
   'installation/reverse-proxy': { artwork: 'shield', palette: 'water' },
 

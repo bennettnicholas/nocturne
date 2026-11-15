@@ -34,6 +34,7 @@ export const DOCS_NAV_SECTIONS: DocsNavSection[] = [
             { href: "/docs/installation/docker-compose", label: "Docker Compose" },
             { href: "/docs/installation/portainer", label: "Portainer" },
             { href: "/docs/installation/oracle-cloud", label: "Oracle Cloud" },
+            { href: "/docs/installation/azure", label: "Microsoft Azure" },
             { href: "/docs/installation/byo-postgres", label: "Bring your own PostgreSQL" },
             { href: "/docs/installation/reverse-proxy", label: "Bring your own reverse proxy" },
         ],
