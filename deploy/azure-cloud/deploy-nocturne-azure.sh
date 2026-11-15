@@ -735,8 +735,11 @@ parse_args() {
   case "$ACTION" in deploy|info|logs|reinstall|ssh|remove) ;; *) fail "Unknown --action '$ACTION'." 'Use deploy, info, logs, reinstall, ssh or remove.' ;; esac
   case "$OS_DISK_GB" in 32|64|128) ;; *) fail '--os-disk-gb must be 32, 64 or 128.' ;; esac
   case "$TIMEOUT_MIN" in ''|*[!0-9]*) fail '--timeout must be a number of minutes.' ;; esac
-  printf '%s' "$LOCATION" | grep -Eq '^[a-z0-9]*$' || fail "Invalid --location '$LOCATION' (e.g. westeurope)."
-  printf '%s' "$NAME" | grep -Eq '^[a-z][a-z0-9-]{1,19}$' || fail "Invalid --name '$NAME' (2-20 lowercase letters, digits, hyphens)."
+  # Empty means "pick from the menu". (Not `printf | grep`: grep given no input at all never matches.)
+  case "$LOCATION" in *[!a-z0-9]*) fail "Invalid --location '$LOCATION' (e.g. westeurope)." ;; esac
+  case "$NAME" in
+    [a-z]*[!a-z0-9-]*|[!a-z]*|?|?????????????????????*) fail "Invalid --name '$NAME' (2-20 lowercase letters, digits, hyphens)." ;;
+  esac
   SECRETS_FILE="$SECRETS_DIR/$RESOURCE_GROUP.env"
   VM_NAME="$NAME-vm"
 }
