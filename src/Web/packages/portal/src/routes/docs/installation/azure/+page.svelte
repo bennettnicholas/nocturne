@@ -10,11 +10,14 @@
     import RouteChoice from "#lib/components/docs/install/RouteChoice.svelte";
     import Domain from "#lib/components/docs/install/Domain.svelte";
     import SiteLink from "#lib/components/docs/install/SiteLink.svelte";
+    import DuckDnsSteps from "#lib/components/docs/install/DuckDnsSteps.svelte";
     import { resolve } from "$app/paths";
     import { createInstallGuide } from "#lib/components/docs/install/guide.svelte.js";
 
     const guide = createInstallGuide({ id: "azure" });
     const mac = $derived(guide.choice("computer", "windows") === "mac");
+    // The deploy script sets the DNS record of a name under duckdns.org itself, given the token.
+    const duckDns = $derived(guide.host?.toLowerCase().endsWith(".duckdns.org") ?? false);
 
     // Where the one-line installers are published: deploy/azure-cloud in the repository.
     // @wc-ignore
@@ -26,7 +29,7 @@
     // @wc-ignore
     const dnsRecords = $derived(`${domainName}      A   <the IP address>\n*.${domainName}    A   <the IP address>`);
 
-    // Without options, the plain form. With a domain, the form that passes it to the deploy script.
+    // Without a domain, the plain form (the script asks for one). With one, the form that passes it.
     const runCommand = $derived.by(() => {
         if (mac) {
             const get = `curl -fsSL ${TOOLKIT}/get-nocturne.sh | bash`;
@@ -50,14 +53,14 @@
         { action: "Info", what: "Show the address, IP address and SSH details" },
         { action: "Logs", what: "Show container status and recent logs" },
         { action: "Ssh", what: "Open a shell on the server. Everything lives in /opt/nocturne" },
-        { action: "Reinstall", what: "Run the installer on the server again, keeping your data and passwords" },
+        { action: "Reinstall", what: "Run the install script on the server again, keeping your data and passwords" },
         { action: "Remove", what: "Delete everything in Azure and stop billing. You type the name to confirm" },
     ];
 
     const STEPS = [
         { id: "step-1", title: "Open a terminal" },
         { id: "step-2", title: "Run the deploy" },
-        { id: "step-3", title: "Pick a region and size" },
+        { id: "step-3", title: "Region, size and DNS" },
         { id: "step-4", title: "Create your first site" },
     ];
 
@@ -93,10 +96,9 @@
         Docker knowledge needed. Most people pay about $20–35 a month.
     </p>
     <p class="text-muted-foreground mb-8">
-        On the server, it installs the same Docker Compose release as every other guide. If you
-        already have a Linux server, use the
+        On the server, it runs the same
         <a href={resolve("/docs/installation/install-script")} class="text-primary hover:underline">install script</a>
-        guide instead.
+        as any other Linux server. If you have a server, use that guide.
     </p>
 
     <h2 class="text-2xl font-bold mt-8 mb-4">What you need</h2>
@@ -108,14 +110,28 @@
         </li>
         <li>A Windows 10/11 PC or a Mac, and about 15–30 minutes.</li>
         <li>
-            A domain name is optional. Without one, the server gets a free address such as
-            <code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded">nocturne-&lt;id&gt;.eastus2.cloudapp.azure.com</code>.
-            The free address holds a single site. Your own domain also gives each site its own
-            subdomain, and enables share links. The DNS provider must support wildcard records.
+            A domain name. Nocturne gives every site its own subdomain, so the DNS provider must
+            support wildcard records. If you do not have a domain, a free one from DuckDNS works well.
         </li>
     </ul>
 
-    <InstallGuideBar steps={STEPS} placeholder="nocturne.example.com (optional)" />
+    <InstallGuideBar steps={STEPS} placeholder="yourname.duckdns.org" />
+
+    {#if !guide.host || duckDns}
+    <h2 id="duckdns" class="text-2xl font-bold mt-8 mb-4 scroll-mt-36">
+        {#if duckDns}Your DuckDNS token{:else}No domain yet? Get one from DuckDNS{/if}
+    </h2>
+    <DuckDnsSteps />
+    <p class="text-muted-foreground mb-8">
+        {#if duckDns}
+            The deploy script asks for the token in
+            <a href="#step-2" class="text-primary hover:underline">Step 2</a>.
+        {:else}
+            Then enter your domain in the bar at the top of the page. If you already own a
+            domain, enter that domain instead and ignore this section.
+        {/if}
+    </p>
+    {/if}
 
     <h2 class="text-2xl font-bold mt-8 mb-4">Your computer</h2>
     <p class="text-muted-foreground mb-4">
@@ -148,9 +164,8 @@
         </p>
     {:else}
         <p class="text-muted-foreground mb-4">
-            Paste this into {mac ? "Terminal" : "PowerShell"}. To use your own domain instead of the
-            free Azure address, enter it in the bar at the top of the page first. The command then
-            contains it.
+            Paste this into {mac ? "Terminal" : "PowerShell"}. The script asks for your domain. Or enter
+            it in the bar at the top of the page first, and the command contains it.
         </p>
     {/if}
     <CodeBlock code={runCommand} class="mb-4" />
@@ -179,7 +194,8 @@
             <li>Creates the server, its network, a firewall and a static IP address, all in one resource group named <strong>rg-nocturne</strong></li>
             <li>Opens only ports 80 and 443 to the internet, and SSH only to your current IP address. Password login is off</li>
             <li>Uses Trusted Launch (secure boot and vTPM) where the size supports it</li>
-            <li>On first boot, the server installs Docker, downloads the latest Nocturne release and starts it</li>
+            <li>Points your DuckDNS name at the server when you give it the token, or prints the two DNS records to create</li>
+            <li>On first boot, the server runs the same install script as the install script guide. It installs Docker and the latest Nocturne release, and starts Nocturne once DNS works</li>
             <li>Follows the install, waits until HTTPS works, and prints your address</li>
         </ul>
     </details>
@@ -192,7 +208,7 @@
         </p>
     </Callout>
 
-    <StepHeading id="step-3" installStep="3">Step 3: Pick a region and size</StepHeading>
+    <StepHeading id="step-3" installStep="3">Step 3: Region, size and DNS</StepHeading>
     <p class="text-muted-foreground mb-4">
         The script lists Azure regions grouped by area, cheapest first, and recommends one.
         <strong>Your health data is stored in the region you choose</strong>, so pick one that meets your
@@ -223,29 +239,36 @@
         Prices are estimates. Your bill depends on the region, currency and taxes. The script shows
         the real figures for your region and asks you to confirm before it creates anything.
     </p>
-    {#if guide.host}
+    {#if !guide.host || duckDns}
+        <p class="text-muted-foreground {duckDns ? 'mb-8' : 'mb-4'}">
+            {#if !guide.host}<strong class="text-foreground">A domain under duckdns.org:</strong>{/if}
+            Once the server exists, the script points your DuckDNS name at it with your token. If you
+            pressed Enter instead, it tells you the address to put in the <strong>current ip</strong> box
+            at duckdns.org.
+        </p>
+    {/if}
+    {#if !duckDns}
         <p class="text-muted-foreground mb-4">
-            After the server is created, the script prints two <strong>A</strong> records. Create them at
-            your domain provider, pointing at the IP address it shows:
+            {#if !guide.host}<strong class="text-foreground">Any other domain:</strong>{/if}
+            Once the server exists, the script prints two <strong>A</strong> records. Create them at your
+            domain provider, pointing at the IP address it shows:
         </p>
         <CodeBlock code={dnsRecords} class="mb-4" />
         <p class="text-muted-foreground mb-8">
             The second one is a wildcard. It makes every site's subdomain resolve without a record
             each. If you use Cloudflare, leave the proxy off for both records, shown as a gray cloud.
-            The script waits until the records work before it requests certificates.
-        </p>
-    {:else}
-        <p class="text-muted-foreground mb-8">
-            With the free Azure address there is no DNS to set up. The script waits for the
-            certificate and then prints your address.
         </p>
     {/if}
+    <p class="text-muted-foreground mb-8">
+        The script waits until the records work. If you need longer, run the same command again later:
+        Nocturne starts by itself as soon as DNS works.
+    </p>
 
     <StepHeading id="step-4" installStep="4">Step 4: Create your first site</StepHeading>
     <p class="text-muted-foreground mb-8">
         When the script finishes, it prints the setup address and offers to open it. If you closed
         the window, open
-        {#if guide.host}<SiteLink path="/setup" />{:else}<code class="text-xs bg-muted/50 px-1.5 py-0.5 rounded">https://&lt;your address&gt;/setup</code>{/if}
+<SiteLink path="/setup" />
         in a browser. Name your first site and create the owner account, with a passkey or a sign-in
         provider. A passkey is your phone's or computer's built-in unlock. If you choose one,
         register a second device as soon as you can, because there is no password to fall back on.

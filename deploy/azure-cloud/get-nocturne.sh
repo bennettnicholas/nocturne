@@ -21,7 +21,7 @@ main() {
   DEST="${NOCTURNE_TOOLS_DIR:-$HOME/nocturne-azure}"
 
   # The toolkit: only these files are downloaded, not the whole repository.
-  files="Deploy-NocturneAzure.ps1 deploy-nocturne-azure.sh install-nocturne.sh infra/nocturne-vm.bicep"
+  files="Deploy-NocturneAzure.ps1 deploy-nocturne-azure.sh infra/nocturne-vm.bicep"
 
   printf '\033[36m==> Downloading the Nocturne deploy toolkit (%s, %s)\033[0m\n' "$REPO" "$BRANCH"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/nocturne-get.XXXXXX")

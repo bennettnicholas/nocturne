@@ -25,7 +25,6 @@ if ($env:NOCTURNE_TOOLS_DIR) { $Dest = $env:NOCTURNE_TOOLS_DIR }
 $Files = @(
     'Deploy-NocturneAzure.ps1',
     'deploy-nocturne-azure.sh',
-    'install-nocturne.sh',
     'infra/nocturne-vm.bicep'
 )
 

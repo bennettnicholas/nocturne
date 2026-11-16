@@ -11,17 +11,15 @@
          cheapest for 2/4/6/8 GB, shows the ESTIMATED monthly cost from Azure's live price list,
          and asks before creating anything.
       4. Creates the VM and its network with Bicep (infra\nocturne-vm.bicep).
-      5. Delivers install-nocturne.sh to the VM and runs it automatically on first boot. That
-         installer is cloud-agnostic: it works on any Ubuntu/Debian server.
-      6. Follows the install from here, then checks Nocturne answers over HTTPS.
+      5. The VM runs Nocturne's install script (the released install.sh) on first boot.
+      6. Sets or shows the DNS records, follows the install, then checks Nocturne answers over HTTPS.
 
     Nocturne runs from its official Docker Compose release bundle: PostgreSQL, API, web app,
     gateway, Caddy (automatic HTTPS) and Watchtower (automatic updates).
 
-    Address:
-      - No -Domain: the free Azure name https://<name>-<hash>.<region>.cloudapp.azure.com
-        (one tenant at the root; Azure DNS names cannot have tenant subdomains).
-      - -Domain nocturne.example.com: your own domain; the script lists the two DNS records to create.
+    Domain: Nocturne needs a domain whose name and wildcard (*.domain) point at the VM. Without
+    -Domain the script asks for one. A free name from duckdns.org works: give the script your
+    DuckDNS token and it sets the record for you. Otherwise it lists the two records to create.
 
     Secrets are generated once and saved in .\secrets\<resource-group>.env. Back that file up.
 
@@ -34,7 +32,7 @@
 .EXAMPLE
     .\Deploy-NocturneAzure.ps1 -Action Logs        # container status and recent logs
 .EXAMPLE
-    .\Deploy-NocturneAzure.ps1 -Action Reinstall   # upload the current install-nocturne.sh and re-run it
+    .\Deploy-NocturneAzure.ps1 -Action Reinstall   # run the install script on the VM again
 .EXAMPLE
     .\Deploy-NocturneAzure.ps1 -Action Ssh         # shell on the VM
 .EXAMPLE
@@ -80,7 +78,7 @@ function Refresh-Path {
 }
 
 $Template    = Join-Path $PSScriptRoot 'infra\nocturne-vm.bicep'
-$Installer   = Join-Path $PSScriptRoot 'install-nocturne.sh'
+$InstallScriptUrl = 'https://github.com/nightscout/nocturne/releases/latest/download/install.sh'
 $SecretsDir  = Join-Path $PSScriptRoot 'secrets'
 $SecretsFile = Join-Path $SecretsDir "$ResourceGroup.env"
 # The commands this script prints for later (remove, logs, ...) are the one-line installer from
@@ -167,7 +165,7 @@ function Get-DeploymentOutputs {
     $o = ($json | Out-String) | ConvertFrom-Json
     return [pscustomobject]@{
         BaseDomain = $o.baseDomain.value; AzureFqdn = $o.azureFqdn.value; Ip = $o.publicIpAddress.value
-        User = $o.adminUsername.value; CustomDomain = $o.usesCustomDomain.value
+        User = $o.adminUsername.value
     }
 }
 
@@ -490,18 +488,33 @@ if ($Action -ne 'Deploy') {
         'Ssh'  { & ssh -i $SshKeyPath "$($o.User)@$($o.AzureFqdn)"; exit $LASTEXITCODE }
         'Logs' {
             Step 'Container status and recent logs (through the Azure agent)'
-            $out = Invoke-VmShell "cd /opt/nocturne && docker compose ps && echo && echo '--- install log ---' && tail -n 15 /var/log/nocturne-install.log && echo && echo '--- last 40 log lines ---' && docker compose logs --tail 40 --no-color"
+            $out = Invoke-VmShell "cd /opt/nocturne && docker compose ps && echo && echo '--- install log ---' && tail -n 15 /var/log/nocturne-install.log && echo && echo '--- nocturne service ---' && journalctl -u nocturne -n 10 --no-pager && echo && echo '--- last 40 log lines ---' && docker compose logs --tail 40 --no-color"
             if ($null -eq $out) { Fail 'Could not reach the VM through the Azure agent. Is it running?' }
             Write-Host $out
             exit 0
         }
         'Reinstall' {
-            Step 'Uploading install-nocturne.sh to the VM and re-running it (keeps .env and data)'
-            $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Installer))
-            $out = Invoke-VmShell "echo '$b64' | base64 -d > /opt/nocturne/install-nocturne.sh && chmod 700 /opt/nocturne/install-nocturne.sh && /opt/nocturne/install-nocturne.sh > /tmp/nocturne-reinstall.out 2>&1; code=`$?; tail -n 25 /tmp/nocturne-reinstall.out; exit `$code"
-            if ($null -eq $out) { Fail 'The installer failed or the VM could not be reached.' @("Details:  $Self -Action Logs") }
+            Step 'Running the install script on the VM again (keeps .env and data; about 2-10 minutes)'
+            # Runs on the VM: Nocturne's install script again, as nocturne-up (which it keeps on the
+            # server). A server set up before it existed downloads it first. The instance key is hidden.
+            $remote = @'
+set -o pipefail
+k=$(sed -n 's/^INSTANCE_KEY=//p' /opt/nocturne/.env)
+d=$(sed -n 's/^BASE_DOMAIN=//p' /opt/nocturne/.env)
+if [ -x /usr/local/sbin/nocturne-up ]; then cmd=/usr/local/sbin/nocturne-up
+else curl -fsSL -o /opt/nocturne/install.sh '__INSTALL_URL__' || { echo 'could not download the install script'; exit 1; }; cmd='bash /opt/nocturne/install.sh'; fi
+BASE_DOMAIN="$d" DNS_WAIT_MINUTES=10 $cmd < /dev/null 2>&1 | sed "s/$k/[instance key: see your secrets file]/g" > /tmp/nocturne-reinstall.out
+code=$?
+tail -n 30 /tmp/nocturne-reinstall.out
+[ "$code" = 0 ] && echo NOCTURNE_REINSTALL_OK
+exit 0
+'@
+            $out = Invoke-VmShell $remote.Replace('__INSTALL_URL__', $InstallScriptUrl)
+            if ($null -eq $out) { Fail 'The VM could not be reached through the Azure agent.' @("Details:  $Self -Action Logs") }
             Write-Host $out
-            if ($out -match 'NOCTURNE_INSTALL_DONE') { Ok 'Reinstall finished' } else { Fail 'Reinstall did not finish (output above).' }
+            if ($out -notmatch 'NOCTURNE_REINSTALL_OK') { Fail 'The install script failed on the VM (output above).' @("Details:  $Self -Action Logs") }
+            if ($out -match 'did not finish configuring') { Warn 'The install script ran, but the server did not finish configuring (see above).' }
+            else { Ok 'Reinstall finished' }
             exit 0
         }
         'Remove' {
@@ -517,12 +530,63 @@ if ($Action -ne 'Deploy') {
 }
 
 # ================================================================ 3. deploy: inputs
-foreach ($f in $Template, $Installer) { if (-not (Test-Path $f)) { Fail "Missing file: $f" } }
-# The installer runs on Linux: make sure it has Unix line endings (an editor may have changed them).
-$installerText = [IO.File]::ReadAllText($Installer)
-if ($installerText.Contains("`r")) {
-    [IO.File]::WriteAllText($Installer, $installerText.Replace("`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
-    Info 'Converted install-nocturne.sh to Unix line endings'
+if (-not (Test-Path $Template)) { Fail "Missing file: $Template" }
+
+# The domain: -Domain, else the one this resource group was deployed with, else asked. For a name
+# under duckdns.org the script also asks for the DuckDNS token, so the record can be set for you.
+Step 'Domain'
+$savedDomain = ''
+if (Test-Path $SecretsFile) {
+    $line = Get-Content $SecretsFile | Where-Object { $_ -match '^CUSTOM_DOMAIN=' } | Select-Object -First 1
+    if ($line) { $savedDomain = $line.Substring('CUSTOM_DOMAIN='.Length).Trim() }
+}
+if (-not $Domain -and $savedDomain) { $Domain = $savedDomain; Ok "Using $Domain (from $SecretsFile)" }
+if (-not $Domain) {
+    Write-Host '  Nocturne needs a domain whose name and every name under it point at the VM, so each site' -ForegroundColor White
+    Write-Host '  gets its own subdomain. Use one you own (e.g. nocturne.example.com), or a free one:' -ForegroundColor White
+    Write-Host '  sign in at https://www.duckdns.org, add a name, and enter it here as yourname.duckdns.org.' -ForegroundColor White
+    $Domain = Read-Host 'Domain'
+}
+$Domain = ($Domain -replace '\s', '').ToLowerInvariant()
+# At least two labels, not an IP address: the same check as the install script.
+if ($Domain -notmatch '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$') {
+    Fail "Invalid domain '$Domain'." @('Use a name such as nocturne.example.com or yourname.duckdns.org (no https://).')
+}
+if ($Domain -like '*.cloudapp.azure.com') {
+    Fail "Azure's own names ($Domain) can't have the wildcard record Nocturne needs." @('Use a domain you own, or a free name from https://www.duckdns.org.')
+}
+$duckName = ''
+$duckToken = "$env:DUCKDNS_TOKEN"
+if ($Domain -like '*.duckdns.org') {
+    # DuckDNS answers every name under yourname.duckdns.org, so one record covers the wildcard too.
+    $duckName = ($Domain -replace '\.duckdns\.org$', '').Split('.')[-1]
+    if (-not $duckToken) {
+        Info 'Paste your DuckDNS token (shown at the top of duckdns.org once signed in) and the record for'
+        Info "$duckName.duckdns.org is set for you. Nothing shows as you paste. Or press Enter to set it yourself."
+        $secure = Read-Host '    DuckDNS token' -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try { $duckToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+        $duckToken = $duckToken -replace '\s', ''
+    }
+    if ($duckToken) {
+        if ($duckToken -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { Ok "Read a $($duckToken.Length)-character DuckDNS token" }
+        else { Warn 'That is not a DuckDNS token (it looks like 01234567-89ab-cdef-0123-456789abcdef). You can set the record yourself.'; $duckToken = '' }
+    }
+}
+Ok "Nocturne will answer on https://$Domain"
+
+# Points $duckName.duckdns.org at $ip. clear=true first: an IPv6 record left from elsewhere would be
+# followed instead of this server.
+function Set-DuckDns([string]$ip) {
+    foreach ($q in 'clear=true', "ip=$ip") {
+        try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri "https://www.duckdns.org/update?domains=$duckName&token=$duckToken&$q" }
+        catch { return $false }
+        if ("$($r.Content)" -notmatch '^OK') { return $false }
+    }
+    return $true
+}
+function Get-ARecords([string]$name) {
+    @(Resolve-DnsName $name -Type A -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
 }
 
 Step 'Your public IP (SSH is only allowed from here)'
@@ -667,7 +731,7 @@ if (Test-Path $SecretsFile) {
     Ok "Reusing secrets from $SecretsFile (the database was created with these)"
     if ($secrets.Contains('CUSTOM_DOMAIN') -and $secrets['CUSTOM_DOMAIN'] -ne $Domain) {
         Warn "The first deployment used domain '$($secrets['CUSTOM_DOMAIN'])' but this run uses '$Domain'."
-        Warn 'The VM keeps its first .env. To change the domain, edit BASE_DOMAIN in /opt/nocturne/.env over SSH and run: docker compose up -d'
+        Warn "The VM keeps the domain it was set up with. To change it, SSH in and run: sudo BASE_DOMAIN=$Domain nocturne-up"
     }
 } else {
     $secrets['INSTANCE_KEY'] = New-Secret 64
@@ -704,7 +768,7 @@ $params = @{
         osDiskSizeGb             = @{ value = $OsDiskGb }
         sshPublicKey             = @{ value = $sshPublicKey }
         sshAllowedCidr           = @{ value = "$myIp/32" }
-        customDomain             = @{ value = $Domain }
+        domain                   = @{ value = $Domain }
         instanceKey              = @{ value = $secrets['INSTANCE_KEY'] }
         postgresPassword         = @{ value = $secrets['POSTGRES_PASSWORD'] }
         postgresAppPassword      = @{ value = $secrets['POSTGRES_APP_PASSWORD'] }
@@ -723,35 +787,50 @@ $o = Get-DeploymentOutputs
 if (-not $o) { Fail 'Deployment finished but its outputs could not be read.' }
 Ok "VM is up at $($o.Ip) ($($o.AzureFqdn))"
 
-if ($o.CustomDomain) {
-    Step "DNS for $($o.BaseDomain)"
-    Write-Host '  Create these two records at your DNS provider:' -ForegroundColor Yellow
-    Write-Host "    A   $($o.BaseDomain)      ->  $($o.Ip)"
-    Write-Host "    A   *.$($o.BaseDomain)    ->  $($o.Ip)      (tenant subdomains and share links)"
-    Info 'Waiting until the domain resolves to the VM (checks every 20s; create the records now)...'
-    $until = (Get-Date).AddMinutes($TimeoutMinutes)
-    while ($true) {
-        $resolved = @(Resolve-DnsName $o.BaseDomain -Type A -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | ForEach-Object { $_.IPAddress })
-        if ($resolved -contains $o.Ip) { Ok "$($o.BaseDomain) resolves to $($o.Ip)"; break }
-        if ((Get-Date) -gt $until) { Fail "DNS for $($o.BaseDomain) still doesn't point to $($o.Ip)." @('Create the records above, then re-run (re-runs are safe).') }
-        Info "...not yet (currently: $(if ($resolved) { $resolved -join ', ' } else { 'no record' }))"
-        Start-Sleep 20
+# Sets or shows the DNS records, then waits until the name and a name under it resolve to the VM.
+Step "DNS for $($o.BaseDomain)"
+$manualDns = $true
+if ($duckName -and $duckToken) {
+    if (Set-DuckDns $o.Ip) { Ok "$duckName.duckdns.org now points at $($o.Ip)"; $manualDns = $false }
+    else { Warn "DuckDNS refused the update. Check the token, and that $duckName is listed under your domains there." }
+}
+if ($manualDns) {
+    if ($duckName) {
+        Write-Host "  At https://www.duckdns.org, set the current ip of $duckName to $($o.Ip) and select update ip." -ForegroundColor Yellow
+    } else {
+        Write-Host '  Create these two records at your DNS provider (do not proxy them through Cloudflare):' -ForegroundColor Yellow
+        Write-Host "    A   $($o.BaseDomain)      ->  $($o.Ip)"
+        Write-Host "    A   *.$($o.BaseDomain)    ->  $($o.Ip)      (each site's subdomain, and share links)"
     }
+}
+Info 'Waiting until the domain resolves to the VM (checks every 20s)...'
+$until = (Get-Date).AddMinutes($TimeoutMinutes)
+while ($true) {
+    $apex = Get-ARecords $o.BaseDomain
+    $sub = Get-ARecords "dns-check.$($o.BaseDomain)"
+    if (($apex -contains $o.Ip) -and ($sub -contains $o.Ip)) { Ok "$($o.BaseDomain) and *.$($o.BaseDomain) resolve to $($o.Ip)"; break }
+    if ((Get-Date) -gt $until) {
+        Fail "DNS for $($o.BaseDomain) still doesn't point to $($o.Ip)." @(
+            'Set the records above, then run the same command again (re-runs are safe). Nocturne starts by itself once DNS works.')
+    }
+    Info "...not yet ($($o.BaseDomain): $(if ($apex) { $apex -join ', ' } else { 'no record' }); *.$($o.BaseDomain): $(if ($sub) { $sub -join ', ' } else { 'no record' }))"
+    Start-Sleep 20
 }
 
 # ================================================================ 5. install runs on the VM; follow it
-Step 'install-nocturne.sh is running on the VM (Docker, then the release bundle) - about 5-10 minutes'
+Step "Nocturne's install script is running on the VM (Docker, then the release) - about 5-10 minutes"
 $until = (Get-Date).AddMinutes($TimeoutMinutes)
 $lastLine = ''
 while ($true) {
-    $out = Invoke-VmShell 'tail -n 3 /var/log/nocturne-install.log 2>/dev/null || echo "(waiting for first-boot setup to start)"; cloud-init status 2>/dev/null | tail -n 1'
+    # The install script colours its output; the escapes are removed on the VM.
+    $out = Invoke-VmShell 'if [ -f /var/log/nocturne-install.log ]; then tail -n 3 /var/log/nocturne-install.log | sed "s/\x1b\[[0-9;]*m//g"; else echo "(waiting for first-boot setup to start)"; fi; cloud-init status 2>/dev/null | tail -n 1'
     if ($out) {
         $lines = @($out -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         $newest = ($lines | Where-Object { $_ -notmatch '^status:' } | Select-Object -Last 1)
         if ($newest -and $newest -ne $lastLine) { Info "VM: $newest"; $lastLine = $newest } else { Info '...still working' }
-        if ($out -match 'NOCTURNE_INSTALL_DONE') { Ok 'install-nocturne.sh finished: containers are running'; break }
-        if ($out -match 'ERROR:' -or $out -match 'status: error') {
-            Fail 'install-nocturne.sh failed on the VM.' @("Details:  $Self -Action Logs",
+        if ($out -match 'NOCTURNE_INSTALL_DONE') { Ok 'The install script finished'; break }
+        if ($out -match 'NOCTURNE_INSTALL_FAILED' -or $out -match 'status: error') {
+            Fail 'The install script failed on the VM.' @("Details:  $Self -Action Logs",
                 "After fixing:  $Self -Action Reinstall")
         }
     } else {

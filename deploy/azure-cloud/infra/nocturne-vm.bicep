@@ -1,10 +1,12 @@
 // Nocturne on a single Azure Linux VM.
 //
-// Only this file is Azure-specific. On first boot the VM runs ../install-nocturne.sh, the
-// cloud-agnostic installer, which is embedded in the VM's custom data (so nothing needs to be
-// hosted anywhere) and runs Nocturne's official Docker Compose release bundle.
+// Only this file is Azure-specific. On first boot the VM downloads Nocturne's released install
+// script (the one the install script guide uses) and runs it. That script installs Docker and the
+// Docker Compose release, keeps itself on the server as nocturne-up with a systemd unit, and waits
+// for DNS before it starts Nocturne.
 //
-// Deployed by Deploy-NocturneAzure.ps1. Everything lives in one resource group.
+// Deployed by Deploy-NocturneAzure.ps1 or deploy-nocturne-azure.sh. Everything lives in one
+// resource group.
 
 @description('Azure region. Defaults to the resource group\'s region.')
 param location string = resourceGroup().location
@@ -35,8 +37,11 @@ param sshPublicKey string
 @description('Public IPv4 address allowed to SSH in (CIDR, e.g. 203.0.113.7/32).')
 param sshAllowedCidr string
 
-@description('Your own domain (e.g. nocturne.example.com). Empty = use the free Azure DNS name.')
-param customDomain string = ''
+@description('The domain Nocturne answers on, e.g. nocturne.example.com or yourname.duckdns.org. It and *.domain must point at the VM.')
+param domain string
+
+@description('The install script to run on first boot. The default is the latest release.')
+param installScriptUrl string = 'https://github.com/nightscout/nocturne/releases/latest/download/install.sh'
 
 @secure()
 @description('INSTANCE_KEY: 32+ characters. Losing it makes stored connector secrets unreadable.')
@@ -54,29 +59,40 @@ param postgresMigratorPassword string
 @secure()
 param postgresWebPassword string
 
-// Free Azure DNS name: <name>-<hash>.<region>.cloudapp.azure.com. The hash is stable per resource
-// group, so re-deploying keeps the same address (and the same Let's Encrypt certificate).
+// The VM's free Azure DNS name, <name>-<hash>.<region>.cloudapp.azure.com, is its SSH address.
+// Nocturne itself needs a domain with a wildcard record, which Azure names cannot have.
 var dnsLabel = toLower('${name}-${uniqueString(resourceGroup().id)}')
 var azureFqdn = '${dnsLabel}.${location}.cloudapp.azure.com'
-var baseDomain = empty(customDomain) ? azureFqdn : customDomain
 
-// The secrets the installer reads with --secrets-file.
-var secretsEnv = 'BASE_DOMAIN=${baseDomain}\nINSTANCE_KEY=${instanceKey}\nPOSTGRES_PASSWORD=${postgresPassword}\nPOSTGRES_APP_PASSWORD=${postgresAppPassword}\nPOSTGRES_MIGRATOR_PASSWORD=${postgresMigratorPassword}\nPOSTGRES_WEB_PASSWORD=${postgresWebPassword}\n'
+// The passwords the deploy script generated, and keeps a copy of. The install script only fills in
+// settings that are blank, so it keeps these.
+var envSeed = 'BASE_DOMAIN=${domain}\nINSTANCE_KEY=${instanceKey}\nPOSTGRES_PASSWORD=${postgresPassword}\nPOSTGRES_APP_PASSWORD=${postgresAppPassword}\nPOSTGRES_MIGRATOR_PASSWORD=${postgresMigratorPassword}\nPOSTGRES_WEB_PASSWORD=${postgresWebPassword}\n'
 
-// First-boot script (cloud-init runs custom data that starts with #!). It saves the installer
-// to /opt/nocturne so it can be re-run later, writes the secrets readable by root only, and runs
-// the installer, which deletes the secrets file once .env exists.
+// First-boot script (cloud-init runs custom data that starts with #!). It writes .env readable by
+// root only, downloads the install script and runs it. The deploy script follows the log until
+// NOCTURNE_INSTALL_DONE. The instance key is never written to the log.
 // replace('\r', '') keeps it valid bash even if this file is saved with Windows line endings.
-var bootScript = replace(replace(replace('''#!/bin/bash
-set -euo pipefail
+var bootScript = replace(replace(replace(replace('''#!/bin/bash
+set -uo pipefail
+exec >> /var/log/nocturne-install.log 2>&1
 mkdir -p /opt/nocturne
 chmod 700 /opt/nocturne
 umask 077
-echo '__INSTALLER_B64__' | base64 -d > /opt/nocturne/install-nocturne.sh
-echo '__SECRETS_B64__' | base64 -d > /opt/nocturne/secrets.env
-chmod 700 /opt/nocturne/install-nocturne.sh
-/opt/nocturne/install-nocturne.sh --secrets-file /opt/nocturne/secrets.env --remove-secrets-file
-''', '\r', ''), '__INSTALLER_B64__', loadFileAsBase64('../install-nocturne.sh')), '__SECRETS_B64__', base64(secretsEnv))
+[ -f /opt/nocturne/.env ] || echo '__ENV_B64__' | base64 -d > /opt/nocturne/.env
+key=$(sed -n 's/^INSTANCE_KEY=//p' /opt/nocturne/.env)
+# A new VM can be without a route to the internet for its first minutes.
+for try in $(seq 1 40); do
+  curl -fsSL -o /opt/nocturne/install.sh '__INSTALL_URL__' && bash -n /opt/nocturne/install.sh && break
+  rm -f /opt/nocturne/install.sh
+  echo "could not download the install script (attempt $try); retrying in 15s"
+  sleep 15
+done
+[ -f /opt/nocturne/install.sh ] || { echo 'NOCTURNE_INSTALL_FAILED: could not download the install script'; exit 1; }
+BASE_DOMAIN='__DOMAIN__' DNS_WAIT_MINUTES=10 bash /opt/nocturne/install.sh < /dev/null 2>&1 \
+  | sed -u "s/$key/[instance key: see your secrets file]/g"
+status=${PIPESTATUS[0]}
+if [ "$status" = 0 ]; then echo NOCTURNE_INSTALL_DONE; else echo "NOCTURNE_INSTALL_FAILED: install.sh exited with $status"; fi
+''', '\r', ''), '__ENV_B64__', base64(envSeed)), '__INSTALL_URL__', installScriptUrl), '__DOMAIN__', domain)
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: '${name}-nsg'
@@ -237,9 +253,8 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   }
 }
 
-output baseDomain string = baseDomain
+output baseDomain string = domain
 output azureFqdn string = azureFqdn
 output publicIpAddress string = publicIp.properties.ipAddress
 output vmName string = vm.name
 output adminUsername string = adminUsername
-output usesCustomDomain bool = !empty(customDomain)

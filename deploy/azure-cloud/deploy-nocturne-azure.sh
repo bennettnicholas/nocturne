@@ -13,16 +13,19 @@
 #      subscription can use there, offers the cheapest with 2/4/6/8 GB, shows the ESTIMATED
 #      monthly cost from Azure's live price list, and asks before creating anything.
 #   4. Creates the VM and its network with Bicep (infra/nocturne-vm.bicep).
-#   5. The VM runs install-nocturne.sh on first boot (cloud-agnostic: any Ubuntu/Debian server).
-#   6. Follows the install, then checks Nocturne answers over HTTPS.
+#   5. The VM runs Nocturne's install script (the released install.sh) on first boot.
+#   6. Sets or shows the DNS records, follows the install, then checks Nocturne answers over HTTPS.
+#
+# Nocturne needs a domain whose name and wildcard (*.domain) point at the VM. A free name from
+# duckdns.org works: give the script your DuckDNS token and it sets the record for you.
 #
 # Usage (in Terminal, from this folder):
-#   bash deploy-nocturne-azure.sh                          deploy (asks for region and size)
+#   bash deploy-nocturne-azure.sh                          deploy (asks for domain, region and size)
 #   bash deploy-nocturne-azure.sh --tenant-id <tenant-id>  sign in to a specific directory (MFA)
 #   bash deploy-nocturne-azure.sh --domain nocturne.example.com
 #   bash deploy-nocturne-azure.sh --action info            address, IP, SSH
 #   bash deploy-nocturne-azure.sh --action logs            container status and recent logs
-#   bash deploy-nocturne-azure.sh --action reinstall       upload install-nocturne.sh and re-run it
+#   bash deploy-nocturne-azure.sh --action reinstall       run the install script on the VM again
 #   bash deploy-nocturne-azure.sh --action ssh             shell on the VM
 #   bash deploy-nocturne-azure.sh --action remove          delete everything in Azure (stops billing)
 #
@@ -30,7 +33,7 @@
 #   --action NAME          deploy (default), info, logs, reinstall, ssh, remove
 #   --location REGION      Azure region, e.g. westeurope (default: choose from a menu)
 #   --vm-size SIZE         a specific VM size (default: choose from a menu with prices)
-#   --domain NAME          your own domain (default: free <name>-<id>.<region>.cloudapp.azure.com)
+#   --domain NAME          the domain Nocturne answers on (default: asked; remembered for re-runs)
 #   --os-disk-gb N         32 (default), 64 or 128
 #   --resource-group NAME  default rg-nocturne
 #   --name NAME            resource name prefix, default nocturne
@@ -66,8 +69,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GET_URL="${NOCTURNE_GET_URL:-https://raw.githubusercontent.com/nightscout/nocturne/main/deploy/azure-cloud/get-nocturne.sh}"
 SELF="curl -fsSL $GET_URL | bash -s --"
 TEMPLATE="$HERE/infra/nocturne-vm.bicep"
-INSTALLER="$HERE/install-nocturne.sh"
+INSTALL_SCRIPT_URL=https://github.com/nightscout/nocturne/releases/latest/download/install.sh
 SECRETS_DIR="$HERE/secrets"
+DUCKDNS_TOKEN="${DUCKDNS_TOKEN:-}"
+DUCK_NAME=''
 DEPLOYMENT=nocturne
 HOURS_PER_MONTH=730
 MEMORY_TIERS='[2,4,6,8]'                      # GB; Nocturne needs 2 minimum, 4 recommended
@@ -306,7 +311,6 @@ load_outputs() {
   O_FQDN=$(printf '%s' "$json" | jq -r '.azureFqdn.value // empty')
   O_IP=$(printf '%s' "$json" | jq -r '.publicIpAddress.value // empty')
   O_USER=$(printf '%s' "$json" | jq -r '.adminUsername.value // empty')
-  O_CUSTOM=$(printf '%s' "$json" | jq -r '.usesCustomDomain.value // false')
   [ -n "$O_BASE" ]
 }
 
@@ -409,6 +413,23 @@ sign_in() {
 }
 
 # ------------------------------------------------------------------ actions other than deploy
+# Runs on the VM: Nocturne's install script again, as nocturne-up (which it keeps on the server).
+# A server set up before it existed downloads it first. The instance key is hidden in the output.
+reinstall_script() {
+  cat <<EOF
+set -o pipefail
+k=\$(sed -n 's/^INSTANCE_KEY=//p' /opt/nocturne/.env)
+d=\$(sed -n 's/^BASE_DOMAIN=//p' /opt/nocturne/.env)
+if [ -x /usr/local/sbin/nocturne-up ]; then cmd=/usr/local/sbin/nocturne-up
+else curl -fsSL -o /opt/nocturne/install.sh '$INSTALL_SCRIPT_URL' || { echo 'could not download the install script'; exit 1; }; cmd='bash /opt/nocturne/install.sh'; fi
+BASE_DOMAIN="\$d" DNS_WAIT_MINUTES=10 \$cmd < /dev/null 2>&1 | sed "s/\$k/[instance key: see your secrets file]/g" > /tmp/nocturne-reinstall.out
+code=\$?
+tail -n 30 /tmp/nocturne-reinstall.out
+[ "\$code" = 0 ] && echo NOCTURNE_REINSTALL_OK
+exit 0
+EOF
+}
+
 other_action() {
   if ! load_outputs && [ "$ACTION" != remove ]; then
     fail "No Nocturne deployment found in '$RESOURCE_GROUP'. Deploy first:  curl -fsSL $GET_URL | bash"
@@ -418,17 +439,20 @@ other_action() {
     ssh)  rm -rf "$WORK"; exec ssh -i "$SSH_KEY" "$O_USER@$O_FQDN" ;;
     logs)
       step 'Container status and recent logs (through the Azure agent)'
-      vm_shell "cd /opt/nocturne && docker compose ps && echo && echo '--- install log ---' && tail -n 15 /var/log/nocturne-install.log && echo && echo '--- last 40 log lines ---' && docker compose logs --tail 40 --no-color" \
+      vm_shell "cd /opt/nocturne && docker compose ps && echo && echo '--- install log ---' && tail -n 15 /var/log/nocturne-install.log && echo && echo '--- nocturne service ---' && journalctl -u nocturne -n 10 --no-pager && echo && echo '--- last 40 log lines ---' && docker compose logs --tail 40 --no-color" \
         || fail 'Could not reach the VM through the Azure agent. Is it running?'
       ;;
     reinstall)
-      step 'Uploading install-nocturne.sh to the VM and re-running it (keeps .env and data)'
-      local b64 out
-      b64=$(tr -d '\r' < "$INSTALLER" | base64 | tr -d '\n')
-      out=$(vm_shell "echo '$b64' | base64 -d > /opt/nocturne/install-nocturne.sh && chmod 700 /opt/nocturne/install-nocturne.sh && /opt/nocturne/install-nocturne.sh > /tmp/nocturne-reinstall.out 2>&1; code=\$?; tail -n 25 /tmp/nocturne-reinstall.out; exit \$code") \
-        || fail 'The installer failed or the VM could not be reached.' "Details:  $SELF --action logs"
+      step 'Running the install script on the VM again (keeps .env and data; about 2-10 minutes)'
+      local out
+      out=$(vm_shell "$(reinstall_script)") \
+        || fail 'The VM could not be reached through the Azure agent.' "Details:  $SELF --action logs"
       printf '%s\n' "$out"
-      case "$out" in *NOCTURNE_INSTALL_DONE*) ok 'Reinstall finished' ;; *) fail 'Reinstall did not finish (output above).' ;; esac
+      case "$out" in *NOCTURNE_REINSTALL_OK*) ;; *) fail 'The install script failed on the VM (output above).' "Details:  $SELF --action logs" ;; esac
+      case "$out" in
+        *'did not finish configuring'*) warn 'The install script ran, but the server did not finish configuring (see above).' ;;
+        *) ok 'Reinstall finished' ;;
+      esac
       ;;
     remove)
       say "This permanently deletes resource group '$RESOURCE_GROUP': the VM, its disk with all Nocturne data, the IP and the network. Billing for them stops." "$C_YELLOW"
@@ -516,15 +540,102 @@ available_sizes() {
   jq -s "$CANDIDATES_JQ" "$WORK/skus.json" "$WORK/usage.json" > "$WORK/candidates.json"
 }
 
+# ------------------------------------------------------------------ domain and DNS
+# A domain name of at least two labels, lower case, not an IP address (as install.sh checks it).
+valid_domain() {
+  case "$1" in ''|*[!a-z0-9.-]*|.*|*.|*..*|-*|*.-*|*-.*|*-) return 1 ;; *.*) ;; *) return 1 ;; esac
+  case "${1##*.}" in ?|*[!a-z]*) return 1 ;; esac
+}
+
+# Sets DOMAIN: --domain, else the one this resource group was deployed with, else asked. For a name
+# under duckdns.org it also asks for the DuckDNS token, so the record can be set for you.
+choose_domain() {
+  step 'Domain'
+  local saved=''
+  [ -f "$SECRETS_FILE" ] && saved=$(env_get CUSTOM_DOMAIN "$SECRETS_FILE")
+  if [ -z "$DOMAIN" ] && [ -n "$saved" ]; then DOMAIN=$saved; ok "Using $DOMAIN (from $SECRETS_FILE)"; fi
+  if [ -z "$DOMAIN" ]; then
+    say '  Nocturne needs a domain whose name and every name under it point at the VM, so each site' "$C_BOLD"
+    say '  gets its own subdomain. Use one you own (e.g. nocturne.example.com), or a free one:' "$C_BOLD"
+    say '  sign in at https://www.duckdns.org, add a name, and enter it here as yourname.duckdns.org.' "$C_BOLD"
+    ask 'Domain: '
+    DOMAIN=$(printf '%s' "$REPLY" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  fi
+  valid_domain "$DOMAIN" || fail "Invalid domain '$DOMAIN'." 'Use a name such as nocturne.example.com or yourname.duckdns.org (no https://).'
+  case "$DOMAIN" in *.cloudapp.azure.com)
+    fail "Azure's own names ($DOMAIN) can't have the wildcard record Nocturne needs." 'Use a domain you own, or a free name from https://www.duckdns.org.' ;;
+  esac
+  case "$DOMAIN" in *.duckdns.org)
+    # DuckDNS answers every name under yourname.duckdns.org, so one record covers the wildcard too.
+    DUCK_NAME=${DOMAIN%.duckdns.org}; DUCK_NAME=${DUCK_NAME##*.}
+    if [ -z "$DUCKDNS_TOKEN" ]; then
+      info "Paste your DuckDNS token (shown at the top of duckdns.org once signed in) and the record for"
+      info "$DUCK_NAME.duckdns.org is set for you. Nothing shows as you paste. Or press Enter to set it yourself."
+      printf '    DuckDNS token: ' > /dev/tty
+      IFS= read -rs DUCKDNS_TOKEN < /dev/tty || DUCKDNS_TOKEN=''
+      printf '\n' > /dev/tty
+      DUCKDNS_TOKEN=$(printf '%s' "$DUCKDNS_TOKEN" | tr -d '[:space:]')
+    fi
+    if [ -n "$DUCKDNS_TOKEN" ]; then
+      case "$DUCKDNS_TOKEN" in
+        ????????-????-????-????-????????????) ok "Read a ${#DUCKDNS_TOKEN}-character DuckDNS token" ;;
+        *) warn 'That is not a DuckDNS token (it looks like 01234567-89ab-cdef-0123-456789abcdef). You can set the record yourself.'; DUCKDNS_TOKEN='' ;;
+      esac
+    fi
+    ;;
+  esac
+  ok "Nocturne will answer on https://$DOMAIN"
+}
+
+# Points DUCK_NAME.duckdns.org at $1. The token is read from a file, so it is never on a command line.
+duckdns_set() {
+  local tf="$WORK/duckdns-token" out
+  ( umask 077; printf '%s' "$DUCKDNS_TOKEN" > "$tf" )
+  # clear=true first: an IPv6 record left from elsewhere would be followed instead of this server.
+  out=$(curl -fsS --max-time 30 -G https://www.duckdns.org/update --data-urlencode "domains=$DUCK_NAME" \
+    --data-urlencode "token@$tf" --data-urlencode clear=true 2>/dev/null) && [ "${out#OK}" != "$out" ] \
+  && out=$(curl -fsS --max-time 30 -G https://www.duckdns.org/update --data-urlencode "domains=$DUCK_NAME" \
+    --data-urlencode "token@$tf" --data-urlencode "ip=$1" 2>/dev/null) && [ "${out#OK}" != "$out" ]
+  local rc=$?
+  rm -f "$tf"
+  return $rc
+}
+
+# Sets or shows the DNS records, then waits until the name and a name under it resolve to the VM.
+setup_dns() {
+  step "DNS for $O_BASE"
+  local manual=1
+  if [ -n "$DUCK_NAME" ] && [ -n "$DUCKDNS_TOKEN" ]; then
+    if duckdns_set "$O_IP"; then ok "$DUCK_NAME.duckdns.org now points at $O_IP"; manual=0
+    else warn "DuckDNS refused the update. Check the token, and that $DUCK_NAME is listed under your domains there."; fi
+  fi
+  if [ "$manual" = 1 ]; then
+    if [ -n "$DUCK_NAME" ]; then
+      say "  At https://www.duckdns.org, set the current ip of $DUCK_NAME to $O_IP and select update ip." "$C_YELLOW"
+    else
+      say '  Create these two records at your DNS provider (do not proxy them through Cloudflare):' "$C_YELLOW"
+      echo "    A   $O_BASE      ->  $O_IP"
+      echo "    A   *.$O_BASE    ->  $O_IP      (each site's subdomain, and share links)"
+    fi
+  fi
+  info 'Waiting until the domain resolves to the VM (checks every 20s)...'
+  local until=$(( $(date +%s) + TIMEOUT_MIN * 60 )) apex sub
+  while :; do
+    apex=$(resolve_a "$O_BASE"); sub=$(resolve_a "dns-check.$O_BASE")
+    if printf '%s\n' "$apex" | grep -qx "$O_IP" && printf '%s\n' "$sub" | grep -qx "$O_IP"; then
+      ok "$O_BASE and *.$O_BASE resolve to $O_IP"; break
+    fi
+    [ "$(date +%s)" -gt "$until" ] && fail "DNS for $O_BASE still doesn't point to $O_IP." \
+      'Set the records above, then run the same command again (re-runs are safe). Nocturne starts by itself once DNS works.'
+    info "...not yet ($O_BASE: $(if [ -n "$apex" ]; then echo "$apex" | tr '\n' ' '; else echo 'no record'; fi); *.$O_BASE: $(if [ -n "$sub" ]; then echo "$sub" | tr '\n' ' '; else echo 'no record'; fi))"
+    sleep 20
+  done
+}
+
 # ------------------------------------------------------------------ deploy
 deploy() {
   [ -f "$TEMPLATE" ] || fail "Missing file: $TEMPLATE"
-  [ -f "$INSTALLER" ] || fail "Missing file: $INSTALLER"
-  # The installer runs on Linux: make sure it has Unix line endings.
-  if grep -q $'\r' "$INSTALLER"; then
-    tr -d '\r' < "$INSTALLER" > "$WORK/installer.lf" && cat "$WORK/installer.lf" > "$INSTALLER"
-    info 'Converted install-nocturne.sh to Unix line endings'
-  fi
+  choose_domain
 
   step 'Your public IP (SSH is only allowed from here)'
   local my_ip
@@ -661,7 +772,7 @@ deploy() {
     first_domain=$(env_get CUSTOM_DOMAIN "$SECRETS_FILE")
     if grep -q '^CUSTOM_DOMAIN=' "$SECRETS_FILE" && [ "$first_domain" != "$DOMAIN" ]; then
       warn "The first deployment used domain '$first_domain' but this run uses '$DOMAIN'."
-      warn 'The VM keeps its first .env. To change the domain, edit BASE_DOMAIN in /opt/nocturne/.env over SSH and run: docker compose up -d'
+      warn "The VM keeps the domain it was set up with. To change it, SSH in and run: sudo BASE_DOMAIN=$DOMAIN nocturne-up"
     fi
   else
     mkdir -p "$SECRETS_DIR" && chmod 700 "$SECRETS_DIR"
@@ -696,7 +807,7 @@ deploy() {
           parameters: {
             name: { value: $name }, vmSize: { value: $size }, imageSku: { value: $image },
             trustedLaunch: { value: $tl }, osDiskSizeGb: { value: $disk },
-            sshPublicKey: { value: $key }, sshAllowedCidr: { value: $cidr }, customDomain: { value: $domain },
+            sshPublicKey: { value: $key }, sshAllowedCidr: { value: $cidr }, domain: { value: $domain },
             instanceKey: { value: $s.INSTANCE_KEY }, postgresPassword: { value: $s.POSTGRES_PASSWORD },
             postgresAppPassword: { value: $s.POSTGRES_APP_PASSWORD },
             postgresMigratorPassword: { value: $s.POSTGRES_MIGRATOR_PASSWORD },
@@ -709,31 +820,18 @@ deploy() {
   load_outputs || fail 'Deployment finished but its outputs could not be read.'
   ok "VM is up at $O_IP ($O_FQDN)"
 
-  if [ "$O_CUSTOM" = true ]; then
-    step "DNS for $O_BASE"
-    say '  Create these two records at your DNS provider:' "$C_YELLOW"
-    echo "    A   $O_BASE      ->  $O_IP"
-    echo "    A   *.$O_BASE    ->  $O_IP      (tenant subdomains and share links)"
-    info 'Waiting until the domain resolves to the VM (checks every 20s; create the records now)...'
-    local until=$(( $(date +%s) + TIMEOUT_MIN * 60 )) resolved
-    while :; do
-      resolved=$(resolve_a "$O_BASE")
-      if printf '%s\n' "$resolved" | grep -qx "$O_IP"; then ok "$O_BASE resolves to $O_IP"; break; fi
-      [ "$(date +%s)" -gt "$until" ] && fail "DNS for $O_BASE still doesn't point to $O_IP." 'Create the records above, then re-run (re-runs are safe).'
-      info "...not yet (currently: $(if [ -n "$resolved" ]; then echo "$resolved" | tr '\n' ' '; else echo 'no record'; fi))"
-      sleep 20
-    done
-  fi
+  setup_dns
 
-  step 'install-nocturne.sh is running on the VM (Docker, then the release bundle) - about 5-10 minutes'
+  step "Nocturne's install script is running on the VM (Docker, then the release) - about 5-10 minutes"
   local until=$(( $(date +%s) + TIMEOUT_MIN * 60 )) out newest last=''
   while :; do
-    if out=$(vm_shell 'tail -n 3 /var/log/nocturne-install.log 2>/dev/null || echo "(waiting for first-boot setup to start)"; cloud-init status 2>/dev/null | tail -n 1'); then
+    # The install script colours its output; the escapes are removed on the VM (GNU sed).
+    if out=$(vm_shell 'if [ -f /var/log/nocturne-install.log ]; then tail -n 3 /var/log/nocturne-install.log | sed "s/\x1b\[[0-9;]*m//g"; else echo "(waiting for first-boot setup to start)"; fi; cloud-init status 2>/dev/null | tail -n 1'); then
       newest=$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | grep -v '^status:' | tail -n 1)
       if [ -n "$newest" ] && [ "$newest" != "$last" ]; then info "VM: $newest"; last=$newest; else info '...still working'; fi
-      case "$out" in *NOCTURNE_INSTALL_DONE*) ok 'install-nocturne.sh finished: containers are running'; break ;; esac
-      case "$out" in *ERROR:*|*'status: error'*)
-        fail 'install-nocturne.sh failed on the VM.' "Details:  $SELF --action logs" "After fixing:  $SELF --action reinstall" ;;
+      case "$out" in *NOCTURNE_INSTALL_DONE*) ok 'The install script finished'; break ;; esac
+      case "$out" in *NOCTURNE_INSTALL_FAILED*|*'status: error'*)
+        fail 'The install script failed on the VM.' "Details:  $SELF --action logs" "After fixing:  $SELF --action reinstall" ;;
       esac
     else
       info '...VM agent not answering yet'
